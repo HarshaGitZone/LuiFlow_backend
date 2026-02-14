@@ -34,8 +34,8 @@ app.use(morgan('combined'));
 app.use(limiter);
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.FRONTEND_URL] 
-    : ['http://localhost:3000', 'http://localhost:5173'],
+    ? [process.env.FRONTEND_URL, 'https://finflow-steel-delta.vercel.app'] 
+    : ['http://localhost:3000', 'http://localhost:5173', 'https://finflow-steel-delta.vercel.app'],
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -112,6 +112,32 @@ app.delete('/api/transactions/:id', async (req, res) => {
     res.json({ success: true, message: 'Transaction deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete transaction' });
+  }
+});
+
+app.put('/api/transactions/:id', async (req, res) => {
+  try {
+    const { date, amount, type, category, description } = req.body;
+    
+    const updatedTransaction = await Transaction.findByIdAndUpdate(
+      req.params.id,
+      { 
+        date: new Date(date),
+        amount: parseFloat(amount),
+        type,
+        category,
+        description
+      },
+      { new: true, runValidators: true }
+    );
+    
+    if (!updatedTransaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+    
+    res.json(updatedTransaction);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update transaction' });
   }
 });
 
