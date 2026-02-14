@@ -5,7 +5,15 @@ const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const mongoose = require('mongoose');
+const multer = require('multer');
+const csv = require('csv-parser');
+const { Readable } = require('stream');
 require('dotenv').config();
+
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -40,6 +48,7 @@ const transactionSchema = new mongoose.Schema({
   category: { type: String, required: true },
   description: { type: String, required: true },
   tags: [String],
+  fingerprint: { type: String, unique: true, required: true },
   isDeleted: { type: Boolean, default: false }
 }, { timestamps: true });
 
@@ -124,6 +133,141 @@ app.get('/api/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString()
   });
+});
+
+// CSV Preview Endpoint
+app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const results = [];
+    const headers = [];
+    let headerCaptured = false;
+    let rowCount = 0;
+
+    const stream = Readable.from(req.file.buffer.toString());
+    
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on('data', (data) => {
+          if (!headerCaptured) {
+            headers.push(...Object.keys(data));
+            headerCaptured = true;
+          }
+          
+          if (rowCount < 20) { // Only first 20 rows for preview
+            results.push(data);
+            rowCount++;
+          }
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+
+    res.json({
+      headers,
+      data: results,
+      totalRows: rowCount
+    });
+  } catch (error) {
+    console.error('CSV preview error:', error);
+    res.status(500).json({ error: 'Failed to parse CSV file' });
+  }
+});
+
+// CSV Import with Column Mapping
+app.post('/api/csv/import', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { columnMapping } = req.body;
+    
+    if (!columnMapping) {
+      return res.status(400).json({ error: 'Column mapping is required' });
+    }
+
+    const mapping = JSON.parse(columnMapping);
+    const results = [];
+    const errors = [];
+    let processedRows = 0;
+    let skippedRows = 0;
+
+    const stream = Readable.from(req.file.buffer.toString());
+    
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on('data', (data) => {
+          try {
+            processedRows++;
+            
+            // Map CSV columns to transaction fields
+            const transaction = {
+              date: new Date(data[mapping.date] || ''),
+              amount: parseFloat(data[mapping.amount] || '0'),
+              type: data[mapping.type] || 'expense',
+              category: data[mapping.category] || 'Uncategorized',
+              description: data[mapping.description] || '',
+              tags: []
+            };
+
+            // Validate required fields
+            if (!transaction.date || isNaN(transaction.date.getTime())) {
+              errors.push({ row: processedRows, error: 'Invalid date format' });
+              skippedRows++;
+              return;
+            }
+
+            if (isNaN(transaction.amount) || transaction.amount <= 0) {
+              errors.push({ row: processedRows, error: 'Invalid amount' });
+              skippedRows++;
+              return;
+            }
+
+            if (!['income', 'expense'].includes(transaction.type)) {
+              transaction.type = 'expense'; // Default to expense
+            }
+
+            // Generate unique fingerprint for deduplication
+            const fingerprint = `${transaction.date.toISOString()}-${transaction.amount}-${transaction.type}-${transaction.description}-${transaction.category}`;
+            transaction.fingerprint = fingerprint;
+
+            results.push(transaction);
+          } catch (error) {
+            errors.push({ row: processedRows, error: error.message });
+            skippedRows++;
+          }
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+
+    // Insert valid transactions into database
+    let insertedCount = 0;
+    if (results.length > 0) {
+      const inserted = await Transaction.insertMany(results);
+      insertedCount = inserted.length;
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        totalRows: processedRows,
+        insertedRows: insertedCount,
+        skippedRows,
+        errors: errors.length
+      },
+      errors: errors.slice(0, 10) // Return first 10 errors for display
+    });
+  } catch (error) {
+    console.error('CSV import error:', error);
+    res.status(500).json({ error: 'Failed to import CSV file' });
+  }
 });
 
 app.use('*', (req, res) => {
