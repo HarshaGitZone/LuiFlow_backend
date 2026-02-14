@@ -97,6 +97,24 @@ app.post('/api/transactions', async (req, res) => {
   }
 });
 
+app.delete('/api/transactions/:id', async (req, res) => {
+  try {
+    const result = await Transaction.findByIdAndUpdate(
+      req.params.id, 
+      { isDeleted: true }, 
+      { new: true }
+    );
+    
+    if (!result) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+    
+    res.json({ success: true, message: 'Transaction deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete transaction' });
+  }
+});
+
 app.get('/api/transactions/summary', async (req, res) => {
   try {
     const summary = await Transaction.aggregate([
