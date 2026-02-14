@@ -8,7 +8,7 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10000;
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker')
   .then(() => console.log('MongoDB Connected'))
