@@ -12,7 +12,10 @@ require('dotenv').config();
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { 
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fieldSize: 10 * 1024 * 1024 // 10MB field limit
+  }
 });
 
 const app = express();
@@ -26,6 +29,15 @@ const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP, please try again later.'
+});
+
+app.use((req, res, next) => {
+  if (req.path.includes('/api/csv/')) {
+    req.setTimeout(120000); // 2 minutes for CSV operations
+  } else {
+    req.setTimeout(30000); // 30 seconds for other operations
+  }
+  next();
 });
 
 app.use(helmet());
@@ -239,11 +251,13 @@ app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
 // CSV Import with Column Mapping
 app.post('/api/csv/import', upload.single('file'), async (req, res) => {
   try {
+    console.log('CSV import request received');
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const { columnMapping } = req.body;
+    console.log('Column mapping received:', columnMapping);
     
     if (!columnMapping) {
       return res.status(400).json({ error: 'Column mapping is required' });
@@ -305,25 +319,63 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
         .on('error', reject);
     });
 
+    console.log(`Processed ${processedRows} rows, ${results.length} valid transactions, ${errors.length} errors`);
+
     // Insert valid transactions into database. Skip duplicate fingerprints instead of failing entire import.
     let insertedCount = 0;
     let duplicateRows = 0;
     if (results.length > 0) {
       try {
-        const inserted = await Transaction.insertMany(results, { ordered: false });
-        insertedCount = inserted.length;
+        console.log('Attempting to insert', results.length, 'transactions');
+        
+        // For production, use bulk insert with better error handling
+        if (process.env.NODE_ENV === 'production') {
+          // Process in batches to avoid timeout
+          const batchSize = 100;
+          for (let i = 0; i < results.length; i += batchSize) {
+            const batch = results.slice(i, i + batchSize);
+            try {
+              const inserted = await Transaction.insertMany(batch, { ordered: false });
+              insertedCount += inserted.length;
+              console.log(`Batch ${Math.floor(i/batchSize) + 1}: Inserted ${inserted.length} transactions`);
+            } catch (batchError) {
+              const writeErrors = batchError?.writeErrors || [];
+              const duplicateWriteErrors = writeErrors.filter(err => err?.code === 11000);
+              const hasOnlyDuplicateErrors =
+                writeErrors.length > 0 && duplicateWriteErrors.length === writeErrors.length;
+
+              if (!hasOnlyDuplicateErrors) {
+                console.error('Batch insertion error:', batchError);
+                throw batchError;
+              }
+
+              duplicateRows += duplicateWriteErrors.length;
+              insertedCount += Math.max(0, batch.length - duplicateWriteErrors.length);
+              console.log(`Batch ${Math.floor(i/batchSize) + 1}: ${duplicateWriteErrors.length} duplicates, ${Math.max(0, batch.length - duplicateWriteErrors.length)} inserted`);
+            }
+          }
+        } else {
+          // Development: Use single insert for simplicity
+          const inserted = await Transaction.insertMany(results, { ordered: false });
+          insertedCount = inserted.length;
+        }
+        
+        console.log('Successfully inserted total of', insertedCount, 'transactions');
       } catch (dbError) {
+        console.error('Database insertion error:', dbError);
         const writeErrors = dbError?.writeErrors || [];
         const duplicateWriteErrors = writeErrors.filter(err => err?.code === 11000);
         const hasOnlyDuplicateErrors =
           writeErrors.length > 0 && duplicateWriteErrors.length === writeErrors.length;
 
         if (!hasOnlyDuplicateErrors) {
+          console.error('Non-duplicate database error, throwing:', dbError);
           throw dbError;
         }
 
         duplicateRows = duplicateWriteErrors.length;
         insertedCount = Math.max(0, results.length - duplicateRows);
+        console.log(`Duplicate handling: ${duplicateRows} duplicates, ${insertedCount} inserted`);
 
         duplicateWriteErrors.forEach(err => {
           const rowIndex = typeof err?.index === 'number' ? err.index + 1 : null;
@@ -335,7 +387,7 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
       }
     }
 
-    res.json({
+    const responseData = {
       success: true,
       summary: {
         totalRows: processedRows,
@@ -345,10 +397,26 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
         errors: errors.length
       },
       errors: errors.slice(0, 10) // Return first 10 errors for display
-    });
+    };
+
+    console.log('Sending response:', responseData);
+    
+    // Ensure response is sent and connection is closed properly
+    res.status(200).json(responseData);
+    console.log('Response sent successfully');
+    
   } catch (error) {
     console.error('CSV import error:', error);
-    res.status(500).json({ error: 'Failed to import CSV file' });
+    
+    // Ensure we always send a response, even on error
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Failed to import CSV file',
+        details: error.message 
+      });
+    } else {
+      console.error('Response already sent, cannot send error response');
+    }
   }
 });
 
