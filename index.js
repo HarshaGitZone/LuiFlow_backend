@@ -93,13 +93,29 @@ const User = require('./src/models/User');
 const salaryPlannerController = require('./src/controllers/salaryPlannerController');
 const SalaryPlanner = require('./src/models/SalaryPlanner');
 
+// Import debt controller and models
+const debtController = require('./src/controllers/debtController');
+const Debt = require('./src/models/Debt');
+const DebtPayment = require('./src/models/DebtPayment');
+
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
-    const { page = 1, limit = 50, type, category, search } = req.query;
+    const { page = 1, limit = 50, type, category, search, startDate, endDate } = req.query;
     const filter = { isDeleted: false, userId: req.userId };
     
     if (type) filter.type = type;
     if (category) filter.category = category;
+    
+    // Add date range filtering
+    if (startDate || endDate) {
+      filter.date = {};
+      if (startDate) {
+        filter.date.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        filter.date.$lte = new Date(endDate);
+      }
+    }
     
     // Add search functionality
     if (search) {
@@ -120,6 +136,7 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
 
     const total = await Transaction.countDocuments(filter);
 
+    // Return consistent format for all endpoints
     res.json({
       transactions,
       pagination: {
@@ -755,6 +772,20 @@ app.get('/api/salary-planner/subscriptions', authenticateToken, salaryPlannerCon
 // Cumulative Savings Routes
 app.put('/api/salary-planner/cumulative-savings', authenticateToken, salaryPlannerController.updateCumulativeSavings);
 app.get('/api/salary-planner/cumulative-savings', authenticateToken, salaryPlannerController.getCumulativeSavings);
+
+// Debt Manager Routes
+app.post('/api/debts', authenticateToken, debtController.createDebt);
+app.get('/api/debts', authenticateToken, debtController.getAllDebts);
+app.get('/api/debts/:id', authenticateToken, debtController.getDebtById);
+app.patch('/api/debts/:id', authenticateToken, debtController.updateDebt);
+app.patch('/api/debts/:id/close', authenticateToken, debtController.closeDebt);
+app.delete('/api/debts/:id', authenticateToken, debtController.deleteDebt);
+
+// Debt Payment Routes
+app.post('/api/debts/:id/payments', authenticateToken, debtController.addPayment);
+app.get('/api/debts/:id/payments', authenticateToken, debtController.getDebtPayments);
+app.patch('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.updatePayment);
+app.delete('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.deletePayment);
 
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
