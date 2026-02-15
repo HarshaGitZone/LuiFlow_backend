@@ -5,6 +5,7 @@ const DebtPayment = require('../models/DebtPayment');
 const createDebt = async (req, res) => {
   try {
     const debtData = { ...req.body, userId: req.userId };
+    const Transaction = req.app.locals.Transaction || mongoose.model('Transaction');
 
     if (!Number.isFinite(Number(debtData.principalAmount))) {
       return res.status(400).json({ error: 'Principal amount must be a valid number' });
@@ -36,6 +37,32 @@ const createDebt = async (req, res) => {
 
     const debt = new Debt(debtData);
     await debt.save();
+
+    // Create a corresponding transaction for the debt (as income/loan received)
+    const transactionData = {
+      userId: req.userId,
+      date: debtData.startDate,
+      description: `Loan from ${debtData.lenderName}`,
+      amount: debtData.principalAmount,
+      type: 'income',
+      category: 'loan',
+      notes: `Loan received from ${debtData.lenderName} - ${debtData.notes || 'No notes'}`,
+      debtId: debt._id,
+      fingerprint: `loan-${debtData.startDate}-${debtData.principalAmount}-${debtData.lenderName}-${Date.now()}`
+    };
+
+    const transaction = new Transaction(transactionData);
+    await transaction.save();
+    
+    console.log('✅ Debt transaction created:', {
+      debtId: debt._id,
+      description: transactionData.description,
+      amount: transactionData.amount,
+      type: transactionData.type,
+      category: transactionData.category,
+      fingerprint: transactionData.fingerprint
+    });
+
     res.status(201).json(debt);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -229,6 +256,12 @@ const deleteDebt = async (req, res) => {
       { isDeleted: true }
     );
 
+    // Also soft delete all related transactions
+    await Transaction.updateMany(
+      { debtId: req.params.id, userId: req.userId },
+      { isDeleted: true }
+    );
+
     res.json({ message: 'Debt deleted successfully' });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -257,6 +290,33 @@ const addPayment = async (req, res) => {
 
     const payment = new DebtPayment(paymentData);
     await payment.save();
+
+    // Create a corresponding transaction for the payment
+    const transactionData = {
+      userId: req.userId,
+      date: paymentData.paymentDate,
+      description: `Payment towards ${debt.lenderName} debt`,
+      amount: paymentData.amountPaid,
+      type: 'expense',
+      category: 'debt-payment',
+      notes: `Debt payment for ${debt.lenderName} - ${paymentData.notes || 'No notes'}`,
+      debtId: debt._id,
+      debtPaymentId: payment._id,
+      fingerprint: `payment-${paymentData.paymentDate}-${paymentData.amountPaid}-${debt.lenderName}-${Date.now()}`
+    };
+
+    const transaction = new Transaction(transactionData);
+    await transaction.save();
+    
+    console.log('✅ Payment transaction created:', {
+      debtId: debt._id,
+      paymentId: payment._id,
+      description: transactionData.description,
+      amount: transactionData.amount,
+      type: transactionData.type,
+      category: transactionData.category,
+      fingerprint: transactionData.fingerprint
+    });
 
     // Check if debt should be automatically closed
     const outstandingBalance = await debt.calculateOutstandingBalance();
@@ -311,6 +371,23 @@ const updatePayment = async (req, res) => {
       return res.status(404).json({ error: 'Payment not found' });
     }
 
+    // Also update the corresponding transaction
+    const debt = await Debt.findById(payment.debtId);
+    if (debt) {
+      const transactionUpdateData = {
+        date: req.body.paymentDate || payment.paymentDate,
+        amount: req.body.amountPaid || payment.amountPaid,
+        notes: req.body.notes ? 
+          `Debt payment for ${debt.lenderName} - ${req.body.notes}` : 
+          `Debt payment for ${debt.lenderName} - ${payment.notes || 'No notes'}`
+      };
+
+      await Transaction.findOneAndUpdate(
+        { debtPaymentId: req.params.paymentId, userId: req.userId },
+        transactionUpdateData
+      );
+    }
+
     res.json(payment);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -329,6 +406,12 @@ const deletePayment = async (req, res) => {
     if (!payment) {
       return res.status(404).json({ error: 'Payment not found' });
     }
+
+    // Also soft delete the corresponding transaction
+    await Transaction.findOneAndUpdate(
+      { debtPaymentId: req.params.paymentId, userId: req.userId },
+      { isDeleted: true }
+    );
 
     // Check if debt should be re-opened
     const debt = await Debt.findById(payment.debtId);

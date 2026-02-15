@@ -53,7 +53,9 @@ const transactionSchema = new mongoose.Schema({
   description: { type: String, required: true },
   tags: [String],
   fingerprint: { type: String, required: true, unique: true },
-  isDeleted: { type: Boolean, default: false }
+  isDeleted: { type: Boolean, default: false },
+  debtId: { type: mongoose.Schema.Types.ObjectId, ref: 'Debt' },
+  debtPaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'DebtPayment' }
 }, { timestamps: true });
 
 transactionSchema.index({ userId: 1, fingerprint: 1 });
@@ -100,6 +102,12 @@ const SalaryPlanner = require('./src/models/SalaryPlanner');
 const debtController = require('./src/controllers/debtController');
 const Debt = require('./src/models/Debt');
 const DebtPayment = require('./src/models/DebtPayment');
+
+// Pass Transaction model to debt controller
+app.use((req, res, next) => {
+  req.app.locals.Transaction = Transaction;
+  next();
+});
 
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
