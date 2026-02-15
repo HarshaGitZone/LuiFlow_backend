@@ -37,7 +37,32 @@ const salaryPlannerSchema = new mongoose.Schema({
     savedAmount: { type: Number, default: 0 },
     monthlyContribution: { type: Number, default: 0 },
     status: { type: String, enum: ['active', 'completed', 'paused'], default: 'active' }
-  }]
+  }],
+  
+  // Subscriptions Manager
+  subscriptions: [{
+    name: { type: String, required: true },
+    provider: { type: String, required: true }, // Netflix, Prime, Spotify, etc.
+    monthlyCost: { type: Number, required: true },
+    renewalDate: { type: String, required: true }, // Day of month (01-31)
+    category: { type: String, default: 'Entertainment' }, // Entertainment, Productivity, Education, etc.
+    status: { type: String, enum: ['active', 'paused', 'cancelled'], default: 'active' },
+    autoRenewal: { type: Boolean, default: true },
+    notes: { type: String, default: '' },
+    startDate: { type: Date, default: Date.now }
+  }],
+  
+  // Cumulative Savings Tracker
+  cumulativeSavings: {
+    totalSaved: { type: Number, default: 0 },
+    manualSavings: { type: Number, default: 0 }, // Track manual savings separately
+    monthlyHistory: [{
+      month: { type: String, required: true }, // YYYY-MM format
+      saved: { type: Number, required: true },
+      manualSaved: { type: Number, default: 0 }, // Manual savings for this month
+      goalsCompleted: { type: Number, default: 0 }
+    }]
+  }
 }, {
   timestamps: true
 });
