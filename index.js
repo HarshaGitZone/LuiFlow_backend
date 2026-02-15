@@ -4,30 +4,63 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const mongoose = require('mongoose');
 const multer = require('multer');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
-require('dotenv').config();
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const compression = require('compression');
+const morgan = require('morgan');
 
-// Import auth controller and user model
-const { register, login, getProfile, updateProfile, authenticateToken } = require('./src/controllers/authController');
-const User = require('./src/models/User');
-
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { 
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-    fieldSize: 10 * 1024 * 1024 // 10MB field limit
-  }
-});
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker';
 
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker')
-  .then(() => console.log('MongoDB Connected -', process.env.NODE_ENV === 'production' ? 'Production' : 'Development'))
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret', (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+    req.userId = user.id;
+    next();
+  });
+};
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+const transactionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  date: { type: Date, required: true },
+  amount: { type: Number, required: true },
+  type: { type: String, enum: ['income', 'expense'], required: true },
+  category: { type: String, required: true },
+  description: { type: String, required: true },
+  tags: [String],
+  fingerprint: { type: String, required: true, unique: true },
+  isDeleted: { type: Boolean, default: false }
+}, { timestamps: true });
+
+transactionSchema.index({ userId: 1, fingerprint: 1 });
+transactionSchema.index({ userId: 1, isDeleted: 1 });
+transactionSchema.index({ date: -1 });
+
+const Transaction = mongoose.model('Transaction', transactionSchema);
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -54,30 +87,26 @@ app.use(cors({
     : ['http://localhost:3000', 'http://localhost:5173'],
   credentials: true
 }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-const transactionSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  date: { type: Date, required: true },
-  amount: { type: Number, required: true },
-  type: { type: String, enum: ['income', 'expense'], required: true },
-  category: { type: String, required: true },
-  description: { type: String, required: true },
-  tags: [String],
-  fingerprint: { type: String, required: true },
-  isDeleted: { type: Boolean, default: false }
-}, { timestamps: true });
-
-const Transaction = mongoose.model('Transaction', transactionSchema);
+// Import auth controller and user model
+const { register, login, getProfile, updateProfile } = require('./src/controllers/authController');
+const User = require('./src/models/User');
 
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
-    const { page = 1, limit = 50, type, category } = req.query;
+    const { page = 1, limit = 50, type, category, search } = req.query;
     const filter = { isDeleted: false, userId: req.userId };
     
     if (type) filter.type = type;
     if (category) filter.category = category;
+    
+    // Add search functionality
+    if (search) {
+      filter.$or = [
+        { description: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } }
+      ];
+    }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -280,6 +309,7 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
     const errors = [];
     let processedRows = 0;
     let skippedRows = 0;
+    let duplicateRows = 0; // Initialize duplicateRows here
 
     const stream = Readable.from(req.file.buffer.toString());
     
@@ -298,7 +328,8 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
               type: data[mapping.type] || 'expense',
               category: data[mapping.category] || 'Uncategorized',
               description: data[mapping.description] || '',
-              tags: []
+              tags: [],
+              rowNumber: processedRows // Track the actual row number
             };
 
             // Validate required fields
@@ -324,19 +355,109 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
 
             results.push(transaction);
           } catch (error) {
+            console.error('Error processing row:', error);
             errors.push({ row: processedRows, error: error.message });
             skippedRows++;
           }
         })
         .on('end', resolve)
-        .on('error', reject);
+        .on('error', (error) => {
+          console.error('CSV parsing error:', error);
+          reject(error);
+        });
     });
 
     console.log(`Processed ${processedRows} rows, ${results.length} valid transactions, ${errors.length} errors`);
 
+    // Pre-check for existing duplicates for better user feedback
+    if (results.length > 0) {
+      const fingerprints = results.map(t => t.fingerprint);
+      
+      try {
+        console.log('Checking for existing fingerprints:', fingerprints);
+        console.log('For user ID:', req.userId);
+        
+        const existingTransactions = await Transaction.find({ 
+          fingerprint: { $in: fingerprints },
+          userId: req.userId // Check both deleted and non-deleted to see what exists
+        }).lean().maxTimeMS(5000);
+        
+        console.log('Found existing transactions:', existingTransactions.length);
+        console.log('Existing fingerprints:', existingTransactions.map(t => ({ fingerprint: t.fingerprint, isDeleted: t.isDeleted })));
+        
+        // Separate deleted and non-deleted transactions
+        const activeTransactions = existingTransactions.filter(t => !t.isDeleted);
+        const deletedTransactions = existingTransactions.filter(t => t.isDeleted);
+        
+        const activeFingerprints = new Set(activeTransactions.map(t => t.fingerprint));
+        const deletedFingerprints = new Set(deletedTransactions.map(t => t.fingerprint));
+        
+        console.log('Active fingerprints (non-deleted):', Array.from(activeFingerprints));
+        console.log('Deleted fingerprints to restore:', Array.from(deletedFingerprints));
+        
+        // Restore deleted transactions instead of inserting duplicates
+        const restorePromises = [];
+        for (const transaction of results) {
+          if (deletedFingerprints.has(transaction.fingerprint)) {
+            const deletedRecord = deletedTransactions.find(t => t.fingerprint === transaction.fingerprint);
+            if (deletedRecord) {
+              restorePromises.push(
+                Transaction.findByIdAndUpdate(deletedRecord._id, { isDeleted: false })
+              );
+              duplicateRows++;
+              errors.push({ 
+                row: transaction.rowNumber, 
+                error: 'Transaction restored (was previously deleted)', 
+                data: transaction,
+                isRestored: true
+              });
+            }
+          }
+        }
+        
+        // Execute restore operations
+        let restoredCount = 0;
+        if (restorePromises.length > 0) {
+          try {
+            const restoreResults = await Promise.all(restorePromises);
+            restoredCount = restoreResults.length;
+            console.log(`Restored ${restorePromises.length} deleted transactions successfully`);
+          } catch (restoreError) {
+            console.error('Error during restore operations:', restoreError);
+            // Continue with insertion if restore fails
+          }
+        }
+        
+        // Remove duplicates (both active and restored) from results before insertion
+        const uniqueResults = results.filter(transaction => {
+          if (activeFingerprints.has(transaction.fingerprint) || deletedFingerprints.has(transaction.fingerprint)) {
+            if (!deletedFingerprints.has(transaction.fingerprint)) {
+              duplicateRows++;
+              errors.push({ 
+                row: transaction.rowNumber, 
+                error: 'Duplicate transaction (already exists for this user)', 
+                data: transaction
+              });
+            }
+            return false;
+          }
+          return true;
+        });
+        
+        console.log(`Found ${duplicateRows} duplicates/restored, ${uniqueResults.length} unique transactions to insert`);
+        
+        // Replace results with only unique transactions for insertion
+        results.length = 0; // Clear the array
+        results.push(...uniqueResults); // Add only unique transactions
+        
+      } catch (dbError) {
+        console.error('Pre-check database error:', dbError.message);
+        // Continue with insertion if pre-check fails
+      }
+    }
+
     // Insert valid transactions into database. Skip duplicate fingerprints instead of failing entire import.
-    let insertedCount = 0;
-    let duplicateRows = 0;
+    let insertedCount = 0; // duplicateRows already initialized above
     if (results.length > 0) {
       try {
         console.log('Attempting to insert', results.length, 'transactions');
@@ -344,23 +465,61 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
         // For production, use bulk insert with better error handling
         if (process.env.NODE_ENV === 'production') {
           // Process in batches to avoid timeout
-          const batchSize = 50; // Reduced batch size for better reliability
+          const batchSize = 25; // Further reduced batch size for better reliability
           for (let i = 0; i < results.length; i += batchSize) {
             const batch = results.slice(i, i + batchSize);
             try {
-              const insertResult = await Transaction.insertMany(batch);
-              insertedCount += insertResult.insertedCount || batch.length;
-              duplicateRows += insertResult.duplicateCount || 0;
-              console.log(`Batch ${Math.floor(i/batchSize) + 1} inserted:`, insertResult);
+              const insertResult = await Transaction.insertMany(batch, { ordered: false });
+              insertedCount += insertResult.length || batch.length;
+              console.log(`Batch ${Math.floor(i/batchSize) + 1} inserted:`, insertResult.length || batch.length);
             } catch (batchError) {
-              console.error(`Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
-              // Continue with next batch instead of failing entire import
+              console.error(`Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError.message);
+              // Try to insert individual records from failed batch
+              for (const record of batch) {
+                try {
+                  await new Transaction(record).save();
+                  insertedCount++;
+                } catch (individualError) {
+                  console.error(`Individual record failed:`, individualError.message);
+                  // Check if it's a duplicate error - if so, don't add to errors since it's already handled
+                  if (individualError.code === 11000) {
+                    console.log(`Skipping duplicate record: ${record.fingerprint}`);
+                  } else {
+                    errors.push({ 
+                      row: record.rowNumber, 
+                      error: `Failed to insert: ${individualError.message}` 
+                    });
+                  }
+                }
+              }
             }
           }
         } else {
           // Development: Use single insert for simplicity
-          const inserted = await Transaction.insertMany(results, { ordered: false });
-          insertedCount = inserted.length;
+          try {
+            const inserted = await Transaction.insertMany(results, { ordered: false });
+            insertedCount = inserted.length;
+          } catch (devError) {
+            console.error('Development insert failed, trying individual records:', devError.message);
+            // Fallback to individual inserts
+            for (const record of results) {
+              try {
+                await new Transaction(record).save();
+                insertedCount++;
+              } catch (individualError) {
+                console.error(`Individual record failed:`, individualError.message);
+                // Check if it's a duplicate error - if so, don't add to errors since it's already handled
+                if (individualError.code === 11000) {
+                  console.log(`Skipping duplicate record: ${record.fingerprint}`);
+                } else {
+                  errors.push({ 
+                    row: record.rowNumber, 
+                    error: `Failed to insert: ${individualError.message}` 
+                  });
+                }
+              }
+            }
+          }
         }
         
         console.log('Successfully inserted total of', insertedCount, 'transactions');
@@ -394,7 +553,7 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
       success: true,
       summary: {
         totalRows: processedRows,
-        insertedRows: insertedCount,
+        insertedRows: insertedCount + restoredCount, // Include both inserted and restored
         skippedRows,
         duplicateRows,
         errors: errors.length
@@ -509,7 +668,8 @@ app.post('/api/csv/dry-run', authenticateToken, upload.single('file'), async (re
       try {
         existingTransactions = await Transaction.find({ 
           fingerprint: { $in: fingerprints },
-          isDeleted: false 
+          isDeleted: false,
+          userId: req.userId // Only check current user's transactions
         }).lean().maxTimeMS(8000);
       } catch (dbError) {
         console.error('Database query error:', dbError.message);
