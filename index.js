@@ -12,7 +12,7 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker';
 
 const connectWithRetry = async (retries = 5, delayMs = 5000) => {
@@ -37,7 +37,7 @@ const connectWithRetry = async (retries = 5, delayMs = 5000) => {
 
     // Start server after DB connection
     app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+      console.log(`Server is running on port ${PORT} (env: ${process.env.PORT || 'default'})`);
     });
   } catch (err) {
     console.error('MongoDB connection error:', err?.message || err);
