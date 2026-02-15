@@ -314,6 +314,132 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
   }
 });
 
+// CSV Dry Run Validation (Validate Only)
+app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
+  try {
+    console.log('Dry run request received');
+    
+    if (!req.file) {
+      console.log('No file uploaded');
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { columnMapping } = req.body;
+    console.log('Column mapping received:', columnMapping);
+    
+    if (!columnMapping) {
+      console.log('No column mapping provided');
+      return res.status(400).json({ error: 'Column mapping is required' });
+    }
+
+    const mapping = JSON.parse(columnMapping);
+    console.log('Parsed mapping:', mapping);
+    
+    const validTransactions = [];
+    const errors = [];
+    let processedRows = 0;
+    let duplicateCount = 0;
+    const allTransactions = [];
+
+    const stream = Readable.from(req.file.buffer.toString());
+    
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on('data', (data) => {
+          try {
+            processedRows++;
+            
+            // Map CSV columns to transaction fields
+            const transaction = {
+              date: new Date(data[mapping.date] || ''),
+              amount: parseFloat(data[mapping.amount] || '0'),
+              type: data[mapping.type] || 'expense',
+              category: data[mapping.category] || 'Uncategorized',
+              description: data[mapping.description] || '',
+              tags: []
+            };
+
+            // Validate required fields
+            if (!transaction.date || isNaN(transaction.date.getTime())) {
+              errors.push({ row: processedRows, error: 'Invalid date format', data: data });
+              return;
+            }
+
+            if (isNaN(transaction.amount) || transaction.amount <= 0) {
+              errors.push({ row: processedRows, error: 'Invalid amount', data: data });
+              return;
+            }
+
+            if (!['income', 'expense'].includes(transaction.type)) {
+              transaction.type = 'expense'; // Default to expense
+            }
+
+            // Generate unique fingerprint for deduplication
+            const fingerprint = `${transaction.date.toISOString()}-${transaction.amount}-${transaction.type}-${transaction.description}-${transaction.category}`;
+            transaction.fingerprint = fingerprint;
+
+            allTransactions.push(transaction);
+          } catch (error) {
+            errors.push({ row: processedRows, error: error.message, data: data });
+          }
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+
+    console.log(`Processed ${processedRows} rows, ${allTransactions.length} valid transactions`);
+
+    // Now check for duplicates in database for all valid transactions
+    if (allTransactions.length > 0) {
+      const fingerprints = allTransactions.map(t => t.fingerprint);
+      const existingTransactions = await Transaction.find({ 
+        fingerprint: { $in: fingerprints },
+        isDeleted: false 
+      });
+
+      const existingFingerprints = new Set(existingTransactions.map(t => t.fingerprint));
+
+      allTransactions.forEach(transaction => {
+        if (existingFingerprints.has(transaction.fingerprint)) {
+          duplicateCount++;
+          errors.push({ 
+            row: processedRows, 
+            error: 'Duplicate transaction (already exists)', 
+            data: transaction,
+            isDuplicate: true
+          });
+        } else {
+          validTransactions.push(transaction);
+        }
+      });
+    }
+
+    const result = {
+      success: true,
+      dryRun: true,
+      summary: {
+        totalRows: processedRows,
+        validRows: validTransactions.length,
+        errorRows: errors.filter(e => !e.isDuplicate).length,
+        duplicateRows: duplicateCount,
+        totalErrors: errors.length
+      },
+      validation: {
+        validTransactions: validTransactions.slice(0, 5), // Show first 5 valid transactions as preview
+        errors: errors.slice(0, 10), // Return first 10 errors for display
+        duplicates: errors.filter(e => e.isDuplicate).slice(0, 5) // Show first 5 duplicates
+      }
+    };
+
+    console.log('Dry run result:', result);
+    res.json(result);
+  } catch (error) {
+    console.error('CSV dry run error:', error);
+    res.status(500).json({ error: 'Failed to validate CSV file' });
+  }
+});
+
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
