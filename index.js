@@ -408,10 +408,17 @@ app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
     // Now check for duplicates in database for all valid transactions
     if (allTransactions.length > 0) {
       const fingerprints = allTransactions.map(t => t.fingerprint);
-      const existingTransactions = await Transaction.find({ 
-        fingerprint: { $in: fingerprints },
-        isDeleted: false 
-      });
+      
+      let existingTransactions = [];
+      try {
+        existingTransactions = await Transaction.find({ 
+          fingerprint: { $in: fingerprints },
+          isDeleted: false 
+        }).lean().maxTimeMS(8000);
+      } catch (dbError) {
+        console.error('Database query error:', dbError.message);
+        console.log('Continuing without duplicate check due to database timeout');
+      }
 
       const existingFingerprints = new Set(existingTransactions.map(t => t.fingerprint));
 
