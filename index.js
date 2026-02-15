@@ -10,6 +10,10 @@ const csv = require('csv-parser');
 const { Readable } = require('stream');
 require('dotenv').config();
 
+// Import auth controller and user model
+const { register, login, getProfile, updateProfile, authenticateToken } = require('./src/controllers/authController');
+const User = require('./src/models/User');
+
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: { 
@@ -54,22 +58,23 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 const transactionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   date: { type: Date, required: true },
   amount: { type: Number, required: true },
   type: { type: String, enum: ['income', 'expense'], required: true },
   category: { type: String, required: true },
   description: { type: String, required: true },
   tags: [String],
-  fingerprint: { type: String, unique: true, required: true },
+  fingerprint: { type: String, required: true },
   isDeleted: { type: Boolean, default: false }
 }, { timestamps: true });
 
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-app.get('/api/transactions', async (req, res) => {
+app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
     const { page = 1, limit = 50, type, category } = req.query;
-    const filter = { isDeleted: false };
+    const filter = { isDeleted: false, userId: req.userId };
     
     if (type) filter.type = type;
     if (category) filter.category = category;
@@ -99,9 +104,10 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
-app.post('/api/transactions', async (req, res) => {
+app.post('/api/transactions', authenticateToken, async (req, res) => {
   try {
-    const transaction = new Transaction(req.body);
+    const transactionData = { ...req.body, userId: req.userId };
+    const transaction = new Transaction(transactionData);
     await transaction.save();
     res.status(201).json(transaction);
   } catch (error) {
@@ -109,10 +115,10 @@ app.post('/api/transactions', async (req, res) => {
   }
 });
 
-app.delete('/api/transactions/:id', async (req, res) => {
+app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
   try {
-    const result = await Transaction.findByIdAndUpdate(
-      req.params.id, 
+    const result = await Transaction.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
       { isDeleted: true }, 
       { new: true }
     );
@@ -127,12 +133,12 @@ app.delete('/api/transactions/:id', async (req, res) => {
   }
 });
 
-app.put('/api/transactions/:id', async (req, res) => {
+app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
   try {
     const { date, amount, type, category, description } = req.body;
     
-    const updatedTransaction = await Transaction.findByIdAndUpdate(
-      req.params.id,
+    const updatedTransaction = await Transaction.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
       { 
         date: new Date(date),
         amount: parseFloat(amount),
@@ -153,10 +159,10 @@ app.put('/api/transactions/:id', async (req, res) => {
   }
 });
 
-app.get('/api/transactions/summary', async (req, res) => {
+app.get('/api/transactions/summary', authenticateToken, async (req, res) => {
   try {
     const summary = await Transaction.aggregate([
-      { $match: { isDeleted: false } },
+      { $match: { isDeleted: false, userId: req.userId } },
       {
         $group: {
           _id: '$type',
@@ -191,8 +197,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Authentication Routes
+app.post('/api/auth/register', register);
+app.post('/api/auth/login', login);
+app.get('/api/auth/profile', authenticateToken, getProfile);
+app.put('/api/auth/profile', authenticateToken, updateProfile);
+
 // CSV Preview Endpoint
-app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
+app.post('/api/csv/preview', authenticateToken, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -249,7 +261,7 @@ app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
 });
 
 // CSV Import with Column Mapping
-app.post('/api/csv/import', upload.single('file'), async (req, res) => {
+app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req, res) => {
   try {
     console.log('CSV import request received');
     if (!req.file) {
@@ -280,6 +292,7 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
             
             // Map CSV columns to transaction fields
             const transaction = {
+              userId: req.userId,
               date: new Date(data[mapping.date] || ''),
               amount: parseFloat(data[mapping.amount] || '0'),
               type: data[mapping.type] || 'expense',
@@ -421,7 +434,7 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
 });
 
 // CSV Dry Run Validation (Validate Only)
-app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
+app.post('/api/csv/dry-run', authenticateToken, upload.single('file'), async (req, res) => {
   try {
     console.log('Dry run request received');
     
@@ -458,6 +471,7 @@ app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
             
             // Map CSV columns to transaction fields
             const transaction = {
+              userId: req.userId,
               date: new Date(data[mapping.date] || ''),
               amount: parseFloat(data[mapping.amount] || '0'),
               type: data[mapping.type] || 'expense',
