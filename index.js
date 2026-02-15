@@ -186,10 +186,15 @@ app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    const page = parseInt(req.body.page) || 1;
+    const limit = parseInt(req.body.limit) || 20;
+    const skip = (page - 1) * limit;
+
     const results = [];
     const headers = [];
     let headerCaptured = false;
     let rowCount = 0;
+    let totalRows = 0;
 
     const stream = Readable.from(req.file.buffer.toString());
     
@@ -202,9 +207,11 @@ app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
             headerCaptured = true;
           }
           
-          if (rowCount < 20) { // Only first 20 rows for preview
+          totalRows++;
+          
+          // Only store rows for the current page
+          if (totalRows > skip && results.length < limit) {
             results.push(data);
-            rowCount++;
           }
         })
         .on('end', resolve)
@@ -214,7 +221,14 @@ app.post('/api/csv/preview', upload.single('file'), async (req, res) => {
     res.json({
       headers,
       data: results,
-      totalRows: rowCount
+      pagination: {
+        page: page,
+        limit: limit,
+        totalRows: totalRows,
+        totalPages: Math.ceil(totalRows / limit),
+        hasNextPage: page < Math.ceil(totalRows / limit),
+        hasPrevPage: page > 1
+      }
     });
   } catch (error) {
     console.error('CSV preview error:', error);
@@ -357,7 +371,8 @@ app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
               type: data[mapping.type] || 'expense',
               category: data[mapping.category] || 'Uncategorized',
               description: data[mapping.description] || '',
-              tags: []
+              tags: [],
+              rowNumber: processedRows // Track the actual row number
             };
 
             // Validate required fields
@@ -404,7 +419,7 @@ app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
         if (existingFingerprints.has(transaction.fingerprint)) {
           duplicateCount++;
           errors.push({ 
-            row: processedRows, 
+            row: transaction.rowNumber, 
             error: 'Duplicate transaction (already exists)', 
             data: transaction,
             isDuplicate: true
@@ -428,7 +443,7 @@ app.post('/api/csv/dry-run', upload.single('file'), async (req, res) => {
       validation: {
         validTransactions: validTransactions.slice(0, 5), // Show first 5 valid transactions as preview
         errors: errors.slice(0, 10), // Return first 10 errors for display
-        duplicates: errors.filter(e => e.isDuplicate).slice(0, 5) // Show first 5 duplicates
+        duplicates: errors.filter(e => e.isDuplicate) // Return ALL duplicates (not limited to 5)
       }
     };
 
