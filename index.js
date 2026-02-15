@@ -344,27 +344,17 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
         // For production, use bulk insert with better error handling
         if (process.env.NODE_ENV === 'production') {
           // Process in batches to avoid timeout
-          const batchSize = 100;
+          const batchSize = 50; // Reduced batch size for better reliability
           for (let i = 0; i < results.length; i += batchSize) {
             const batch = results.slice(i, i + batchSize);
             try {
-              const inserted = await Transaction.insertMany(batch, { ordered: false });
-              insertedCount += inserted.length;
-              console.log(`Batch ${Math.floor(i/batchSize) + 1}: Inserted ${inserted.length} transactions`);
+              const insertResult = await Transaction.insertMany(batch);
+              insertedCount += insertResult.insertedCount || batch.length;
+              duplicateRows += insertResult.duplicateCount || 0;
+              console.log(`Batch ${Math.floor(i/batchSize) + 1} inserted:`, insertResult);
             } catch (batchError) {
-              const writeErrors = batchError?.writeErrors || [];
-              const duplicateWriteErrors = writeErrors.filter(err => err?.code === 11000);
-              const hasOnlyDuplicateErrors =
-                writeErrors.length > 0 && duplicateWriteErrors.length === writeErrors.length;
-
-              if (!hasOnlyDuplicateErrors) {
-                console.error('Batch insertion error:', batchError);
-                throw batchError;
-              }
-
-              duplicateRows += duplicateWriteErrors.length;
-              insertedCount += Math.max(0, batch.length - duplicateWriteErrors.length);
-              console.log(`Batch ${Math.floor(i/batchSize) + 1}: ${duplicateWriteErrors.length} duplicates, ${Math.max(0, batch.length - duplicateWriteErrors.length)} inserted`);
+              console.error(`Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
+              // Continue with next batch instead of failing entire import
             }
           }
         } else {
