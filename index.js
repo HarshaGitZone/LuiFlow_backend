@@ -15,18 +15,44 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker';
 
-mongoose.connect(MONGODB_URI)
-  .then(async () => {
+const connectWithRetry = async (retries = 5, delayMs = 5000) => {
+  try {
+    const maskedHost = (MONGODB_URI || '').split('@').pop()?.split('/')[0] || 'localhost';
+    console.log('Connecting to Mongo host (masked):', maskedHost);
+
+    await mongoose.connect(MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 10000
+    });
+
     console.log('Connected to MongoDB');
+
     try {
-      // Drop the problematic global index if it exists
       await mongoose.connection.collection('transactions').dropIndex('fingerprint_1');
       console.log('Fixed: Dropped global fingerprint index');
     } catch (e) {
       // Ignore if index doesn't exist
     }
-  })
-  .catch(err => console.error('MongoDB connection error:', err));
+
+    // Start server after DB connection
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('MongoDB connection error:', err?.message || err);
+    if (retries > 0) {
+      console.log(`Retrying MongoDB connection in ${delayMs}ms (${retries} retries left)`);
+      setTimeout(() => connectWithRetry(retries - 1, delayMs), delayMs);
+    } else {
+      console.error('Failed to connect to MongoDB after multiple attempts');
+      // Exit process so deploy platform can restart if configured
+      process.exit(1);
+    }
+  }
+};
+
+connectWithRetry();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -887,6 +913,4 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+// Server is started after successful MongoDB connection in connectWithRetry()
