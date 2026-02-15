@@ -89,6 +89,10 @@ app.use(cors({
 const { register, login, getProfile, updateProfile } = require('./src/controllers/authController');
 const User = require('./src/models/User');
 
+// Import salary planner controller and model
+const salaryPlannerController = require('./src/controllers/salaryPlannerController');
+const SalaryPlanner = require('./src/models/SalaryPlanner');
+
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
     const { page = 1, limit = 50, type, category, search } = req.query;
@@ -703,7 +707,7 @@ app.post('/api/csv/dry-run', authenticateToken, upload.single('file'), async (re
       validation: {
         validTransactions: validTransactions.slice(0, 5), // Show first 5 valid transactions as preview
         errors: errors.slice(0, 10), // Return first 10 errors for display
-        duplicates: errors.filter(e => e.isDuplicate) // Return ALL duplicates (not limited to 5)
+        duplicates: errors.filter(e => e.isDuplicate) // Return ALL duplicates
       }
     };
 
@@ -714,6 +718,23 @@ app.post('/api/csv/dry-run', authenticateToken, upload.single('file'), async (re
     res.status(500).json({ error: 'Failed to validate CSV file' });
   }
 });
+
+// Salary Planner Routes
+app.get('/api/salary-planner', authenticateToken, salaryPlannerController.getSalaryPlanner);
+app.put('/api/salary-planner', authenticateToken, salaryPlannerController.updateSalaryPlanner);
+
+// Fixed Bills Routes
+app.post('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.addFixedBill);
+app.put('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.updateFixedBill);
+app.delete('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.deleteFixedBill);
+
+// Variable Expenses Routes
+app.put('/api/salary-planner/variable-expense', authenticateToken, salaryPlannerController.updateVariableExpense);
+
+// Savings Goals Routes
+app.post('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.addSavingsGoal);
+app.put('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.updateSavingsGoal);
+app.delete('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.deleteSavingsGoal);
 
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
