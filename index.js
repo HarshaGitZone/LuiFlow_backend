@@ -746,16 +746,16 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Salary Planner Routes (temporarily without auth for testing)
-app.get('/api/salary-planner', salaryPlannerController.getSalaryPlanner);
-app.put('/api/salary-planner', salaryPlannerController.updateSalaryPlanner);
-app.post('/api/salary-planner/fixed-bill', salaryPlannerController.addFixedBill);
-app.put('/api/salary-planner/fixed-bill', salaryPlannerController.updateFixedBill);
-app.delete('/api/salary-planner/fixed-bill', salaryPlannerController.deleteFixedBill);
-app.put('/api/salary-planner/variable-expense', salaryPlannerController.updateVariableExpense);
-app.post('/api/salary-planner/savings-goal', salaryPlannerController.addSavingsGoal);
-app.put('/api/salary-planner/savings-goal', salaryPlannerController.updateSavingsGoal);
-app.delete('/api/salary-planner/savings-goal', salaryPlannerController.deleteSavingsGoal);
+// Salary Planner Routes
+app.get('/api/salary-planner', authenticateToken, salaryPlannerController.getSalaryPlanner);
+app.put('/api/salary-planner', authenticateToken, salaryPlannerController.updateSalaryPlanner);
+app.post('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.addFixedBill);
+app.put('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.updateFixedBill);
+app.delete('/api/salary-planner/fixed-bill', authenticateToken, salaryPlannerController.deleteFixedBill);
+app.put('/api/salary-planner/variable-expense', authenticateToken, salaryPlannerController.updateVariableExpense);
+app.post('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.addSavingsGoal);
+app.put('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.updateSavingsGoal);
+app.delete('/api/salary-planner/savings-goal', authenticateToken, salaryPlannerController.deleteSavingsGoal);
 app.post('/api/salary-planner/subscription', authenticateToken, salaryPlannerController.addSubscription);
 app.put('/api/salary-planner/subscription', authenticateToken, salaryPlannerController.updateSubscription);
 app.delete('/api/salary-planner/subscription', authenticateToken, salaryPlannerController.deleteSubscription);

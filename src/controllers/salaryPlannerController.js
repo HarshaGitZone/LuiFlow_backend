@@ -20,7 +20,7 @@ const getSalaryPlanner = async (req, res) => {
       const defaultPlanner = new SalaryPlanner({
         userId,
         month: month || new Date().toISOString().slice(0, 7),
-        salary: { amount: 45000, creditDate: '01' },
+        salary: { amount: 45000, creditDate: '01', month: month || new Date().toISOString().slice(0, 7) },
         fixedBills: [
           { name: 'Rent', amount: 15000, dueDate: '01', status: 'unpaid' },
           { name: 'Electricity', amount: 2000, dueDate: '10', status: 'unpaid' },
