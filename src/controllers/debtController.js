@@ -5,6 +5,35 @@ const DebtPayment = require('../models/DebtPayment');
 const createDebt = async (req, res) => {
   try {
     const debtData = { ...req.body, userId: req.userId };
+
+    if (!Number.isFinite(Number(debtData.principalAmount))) {
+      return res.status(400).json({ error: 'Principal amount must be a valid number' });
+    }
+
+    if (debtData.tenure === '' || debtData.tenure === null || debtData.tenure === undefined) {
+      delete debtData.tenure;
+    } else {
+      const parsedTenure = Number(debtData.tenure);
+      if (Number.isFinite(parsedTenure)) {
+        debtData.tenure = parsedTenure;
+      } else {
+        delete debtData.tenure;
+      }
+    }
+
+    if (debtData.interestType === 'none') {
+      debtData.interestRate = 0;
+    } else if (debtData.interestRate === '' || debtData.interestRate === null || debtData.interestRate === undefined) {
+      delete debtData.interestRate;
+    } else {
+      const parsedInterestRate = Number(debtData.interestRate);
+      if (Number.isFinite(parsedInterestRate)) {
+        debtData.interestRate = parsedInterestRate;
+      } else {
+        delete debtData.interestRate;
+      }
+    }
+
     const debt = new Debt(debtData);
     await debt.save();
     res.status(201).json(debt);
@@ -120,9 +149,35 @@ const getDebtById = async (req, res) => {
 // Update debt details
 const updateDebt = async (req, res) => {
   try {
+    const updateData = { ...req.body };
+
+    if (updateData.tenure === '' || updateData.tenure === null || updateData.tenure === undefined) {
+      delete updateData.tenure;
+    } else {
+      const parsedTenure = Number(updateData.tenure);
+      if (Number.isFinite(parsedTenure)) {
+        updateData.tenure = parsedTenure;
+      } else {
+        delete updateData.tenure;
+      }
+    }
+
+    if (updateData.interestType === 'none') {
+      updateData.interestRate = 0;
+    } else if (updateData.interestRate === '' || updateData.interestRate === null || updateData.interestRate === undefined) {
+      delete updateData.interestRate;
+    } else {
+      const parsedInterestRate = Number(updateData.interestRate);
+      if (Number.isFinite(parsedInterestRate)) {
+        updateData.interestRate = parsedInterestRate;
+      } else {
+        delete updateData.interestRate;
+      }
+    }
+
     const debt = await Debt.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId, isDeleted: false },
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     );
 

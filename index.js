@@ -33,7 +33,10 @@ const authenticateToken = (req, res, next) => {
     if (err) {
       return res.status(403).json({ error: 'Invalid token' });
     }
-    req.userId = user.id;
+    req.userId = user.userId || user.id;
+    if (!req.userId) {
+      return res.status(403).json({ error: 'Invalid token payload' });
+    }
     next();
   });
 };
