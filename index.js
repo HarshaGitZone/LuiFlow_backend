@@ -85,6 +85,7 @@ const ImportHistory = require('./src/models/ImportHistory');
 const { register, login, getProfile, updateProfile } = require('./src/controllers/authController');
 const salaryPlannerController = require('./src/controllers/salaryPlannerController');
 const debtController = require('./src/controllers/debtController');
+const analyticsController = require('./src/controllers/analyticsController');
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -709,6 +710,8 @@ app.get('/api/transactions/summary', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch summary' });
   }
 });
+
+app.get('/api/analytics', authenticateToken, analyticsController.getAnalytics);
 
 app.get('/api/health', (req, res) => {
   res.json({
