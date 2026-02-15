@@ -305,11 +305,34 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
         .on('error', reject);
     });
 
-    // Insert valid transactions into database
+    // Insert valid transactions into database. Skip duplicate fingerprints instead of failing entire import.
     let insertedCount = 0;
+    let duplicateRows = 0;
     if (results.length > 0) {
-      const inserted = await Transaction.insertMany(results);
-      insertedCount = inserted.length;
+      try {
+        const inserted = await Transaction.insertMany(results, { ordered: false });
+        insertedCount = inserted.length;
+      } catch (dbError) {
+        const writeErrors = dbError?.writeErrors || [];
+        const duplicateWriteErrors = writeErrors.filter(err => err?.code === 11000);
+        const hasOnlyDuplicateErrors =
+          writeErrors.length > 0 && duplicateWriteErrors.length === writeErrors.length;
+
+        if (!hasOnlyDuplicateErrors) {
+          throw dbError;
+        }
+
+        duplicateRows = duplicateWriteErrors.length;
+        insertedCount = Math.max(0, results.length - duplicateRows);
+
+        duplicateWriteErrors.forEach(err => {
+          const rowIndex = typeof err?.index === 'number' ? err.index + 1 : null;
+          errors.push({
+            row: rowIndex,
+            error: 'Duplicate transaction (already exists)'
+          });
+        });
+      }
     }
 
     res.json({
@@ -318,6 +341,7 @@ app.post('/api/csv/import', upload.single('file'), async (req, res) => {
         totalRows: processedRows,
         insertedRows: insertedCount,
         skippedRows,
+        duplicateRows,
         errors: errors.length
       },
       errors: errors.slice(0, 10) // Return first 10 errors for display
