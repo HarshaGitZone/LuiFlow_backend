@@ -102,6 +102,7 @@ const SalaryPlanner = require('./src/models/SalaryPlanner');
 const debtController = require('./src/controllers/debtController');
 const Debt = require('./src/models/Debt');
 const DebtPayment = require('./src/models/DebtPayment');
+const Budget = require('./src/models/Budget');
 
 // Pass Transaction model to debt controller
 app.use((req, res, next) => {
@@ -797,6 +798,138 @@ app.post('/api/debts/:id/payments', authenticateToken, debtController.addPayment
 app.get('/api/debts/:id/payments', authenticateToken, debtController.getDebtPayments);
 app.patch('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.updatePayment);
 app.delete('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.deletePayment);
+
+const getBudgetStatus = (budget) => {
+  const amount = Number(budget.amount) || 0;
+  const spent = Number(budget.spent) || 0;
+  if (amount <= 0) return 'under';
+  const usedPercentage = (spent / amount) * 100;
+  if (usedPercentage > 100) return 'over';
+  if (usedPercentage >= 75) return 'on-track';
+  return 'under';
+};
+
+const ensureDefaultBudgets = async (userId) => {
+  const existingCount = await Budget.countDocuments({ userId });
+  if (existingCount > 0) {
+    return;
+  }
+
+  const defaults = [
+    { name: 'Food Budget', amount: 15000, spent: 4800, category: 'Food', period: 'Monthly' },
+    { name: 'Subscription Budget', amount: 5000, spent: 1750, category: 'Subscriptions', period: 'Monthly' },
+    { name: 'Convenience Budget', amount: 3500, spent: 950, category: 'Convenience', period: 'Monthly' }
+  ].map((item) => ({
+    ...item,
+    userId,
+    remaining: item.amount - item.spent
+  }));
+
+  await Budget.insertMany(defaults);
+};
+
+app.get('/api/budgets', authenticateToken, async (req, res) => {
+  try {
+    await ensureDefaultBudgets(req.userId);
+    const budgets = await Budget.find({ userId: req.userId }).sort({ createdAt: -1 }).lean();
+    const withStatus = budgets.map((budget) => ({
+      ...budget,
+      remaining: (Number(budget.amount) || 0) - (Number(budget.spent) || 0),
+      status: getBudgetStatus(budget)
+    }));
+    res.json(withStatus);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch budgets' });
+  }
+});
+
+app.post('/api/budgets', authenticateToken, async (req, res) => {
+  try {
+    const { name, amount, spent = 0, category, period = 'Monthly' } = req.body;
+    if (!name || !category || Number(amount) <= 0) {
+      return res.status(400).json({ error: 'name, category and positive amount are required' });
+    }
+
+    const safeAmount = Number(amount);
+    const safeSpent = Number(spent) || 0;
+    const createdBudget = await Budget.create({
+      userId: req.userId,
+      name: String(name).trim(),
+      amount: safeAmount,
+      spent: safeSpent,
+      remaining: safeAmount - safeSpent,
+      category: String(category).trim(),
+      period: String(period || 'Monthly').trim()
+    });
+
+    res.status(201).json({
+      ...createdBudget.toObject(),
+      status: getBudgetStatus(createdBudget)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create budget' });
+  }
+});
+
+app.put('/api/budgets/:id', authenticateToken, async (req, res) => {
+  try {
+    const updates = {};
+    const allowedFields = ['name', 'amount', 'spent', 'category', 'period'];
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    });
+
+    if (updates.amount !== undefined) updates.amount = Number(updates.amount);
+    if (updates.spent !== undefined) updates.spent = Number(updates.spent);
+    if (updates.name !== undefined) updates.name = String(updates.name).trim();
+    if (updates.category !== undefined) updates.category = String(updates.category).trim();
+    if (updates.period !== undefined) updates.period = String(updates.period).trim();
+
+    const existing = await Budget.findOne({ _id: req.params.id, userId: req.userId });
+    if (!existing) {
+      return res.status(404).json({ error: 'Budget not found' });
+    }
+
+    const nextAmount = updates.amount !== undefined ? updates.amount : Number(existing.amount) || 0;
+    const nextSpent = updates.spent !== undefined ? updates.spent : Number(existing.spent) || 0;
+
+    if (nextAmount <= 0) {
+      return res.status(400).json({ error: 'Amount must be greater than 0' });
+    }
+    if (nextSpent < 0) {
+      return res.status(400).json({ error: 'Spent cannot be negative' });
+    }
+
+    updates.remaining = nextAmount - nextSpent;
+
+    const updatedBudget = await Budget.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      updates,
+      { new: true, runValidators: true }
+    );
+
+    res.json({
+      ...updatedBudget.toObject(),
+      status: getBudgetStatus(updatedBudget)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update budget' });
+  }
+});
+
+app.delete('/api/budgets/:id', authenticateToken, async (req, res) => {
+  try {
+    const deletedBudget = await Budget.findOneAndDelete({ _id: req.params.id, userId: req.userId });
+    if (!deletedBudget) {
+      return res.status(404).json({ error: 'Budget not found' });
+    }
+    res.json({ success: true, message: 'Budget deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete budget' });
+  }
+});
 
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
