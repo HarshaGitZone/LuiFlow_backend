@@ -15,6 +15,18 @@ const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker';
 
+const corsOptions = {
+  origin: process.env.NODE_ENV === 'production'
+    ? [process.env.FRONTEND_URL, 'https://finflow-steel-delta.vercel.app']
+    : ['http://localhost:3000', 'http://localhost:5173'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 const connectWithRetry = async (retries = 5, delayMs = 5000) => {
   try {
     const maskedHost = (MONGODB_URI || '').split('@').pop()?.split('/')[0] || 'localhost';
@@ -118,7 +130,8 @@ const portfolioController = require('./src/controllers/portfolioController');
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: 'Too many requests from this IP, please try again later.'
+  message: 'Too many requests from this IP, please try again later.',
+  skip: (req) => req.method === 'OPTIONS'
 });
 
 app.use((req, res, next) => {
@@ -134,12 +147,6 @@ app.use(helmet());
 app.use(compression());
 app.use(morgan('combined'));
 app.use(limiter);
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? [process.env.FRONTEND_URL, 'https://finflow-steel-delta.vercel.app']
-    : ['http://localhost:3000', 'http://localhost:5173'],
-  credentials: true
-}));
 
 // Pass Transaction model to debt controller
 app.use((req, res, next) => {
