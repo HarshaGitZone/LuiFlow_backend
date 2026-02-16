@@ -6,15 +6,41 @@ const getTransactionModel = (req) => {
   return req.app?.locals?.Transaction || mongoose.model('Transaction');
 };
 
+const normalizeDateInput = (value) => {
+  if (!value) return value;
+  if (value instanceof Date) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/;
+    const match = trimmed.match(dateOnly);
+    if (match) {
+      const [, year, month, day] = match;
+      // Use noon UTC to keep date stable across negative/positive local offsets.
+      return new Date(`${year}-${month}-${day}T12:00:00.000Z`);
+    }
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return value;
+};
+
 const syncDebtAsIncomeTransaction = async ({ Transaction, userId, debt }) => {
+  const loanFingerprint = `loan-debt-${debt._id}`;
   await Transaction.findOneAndUpdate(
     {
       userId,
-      debtId: debt._id,
-      $or: [{ debtPaymentId: { $exists: false } }, { debtPaymentId: null }]
+      $or: [
+        {
+          debtId: debt._id,
+          $or: [{ debtPaymentId: { $exists: false } }, { debtPaymentId: null }]
+        },
+        { fingerprint: loanFingerprint }
+      ]
     },
     {
       $set: {
+        debtId: debt._id,
+        debtPaymentId: null,
         date: debt.startDate,
         description: `Loan from ${debt.lenderName}`,
         amount: debt.principalAmount,
@@ -24,7 +50,7 @@ const syncDebtAsIncomeTransaction = async ({ Transaction, userId, debt }) => {
         isDeleted: false
       },
       $setOnInsert: {
-        fingerprint: `loan-debt-${debt._id}`
+        fingerprint: loanFingerprint
       }
     },
     { upsert: true }
@@ -40,6 +66,8 @@ const syncDebtPaymentAsExpenseTransaction = async ({ Transaction, userId, debt, 
     },
     {
       $set: {
+        debtId: debt._id,
+        debtPaymentId: payment._id,
         date: payment.paymentDate,
         description: `Payment towards ${debt.lenderName} debt`,
         amount: payment.amountPaid,
@@ -61,6 +89,7 @@ const createDebt = async (req, res) => {
   try {
     const debtData = { ...req.body, userId: req.userId };
     const Transaction = getTransactionModel(req);
+    debtData.startDate = normalizeDateInput(debtData.startDate);
 
     if (!Number.isFinite(Number(debtData.principalAmount))) {
       return res.status(400).json({ error: 'Principal amount must be a valid number' });
@@ -231,6 +260,9 @@ const updateDebt = async (req, res) => {
   try {
     const Transaction = getTransactionModel(req);
     const updateData = { ...req.body };
+    if (updateData.startDate !== undefined) {
+      updateData.startDate = normalizeDateInput(updateData.startDate);
+    }
 
     if (updateData.tenure === '' || updateData.tenure === null || updateData.tenure === undefined) {
       delete updateData.tenure;
@@ -267,6 +299,7 @@ const updateDebt = async (req, res) => {
     }
 
     await syncDebtAsIncomeTransaction({ Transaction, userId: req.userId, debt });
+    req.app.emit('transaction-updated', { userId: req.userId, action: 'debt-update', debtId: debt._id });
 
     res.json(debt);
   } catch (error) {
@@ -334,6 +367,7 @@ const addPayment = async (req, res) => {
       debtId: req.params.id,
       userId: req.userId
     };
+    paymentData.paymentDate = normalizeDateInput(paymentData.paymentDate);
 
     // Verify debt exists and belongs to user
     const debt = await Debt.findOne({
@@ -409,9 +443,13 @@ const getDebtPayments = async (req, res) => {
 const updatePayment = async (req, res) => {
   try {
     const Transaction = getTransactionModel(req);
+    const updatePayload = { ...req.body };
+    if (updatePayload.paymentDate !== undefined) {
+      updatePayload.paymentDate = normalizeDateInput(updatePayload.paymentDate);
+    }
     const payment = await DebtPayment.findOneAndUpdate(
       { _id: req.params.paymentId, userId: req.userId, isDeleted: false },
-      req.body,
+      updatePayload,
       { new: true, runValidators: true }
     );
 
