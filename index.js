@@ -385,6 +385,29 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
 
 
         console.log('Successfully inserted total of', insertedCount, 'transactions');
+        
+        // Update budget spent amounts for all affected categories
+        if (insertedCount > 0) {
+          const categoriesToUpdate = new Set();
+          results.forEach(transaction => {
+            if (transaction.type === 'expense') {
+              categoriesToUpdate.add(transaction.category);
+            }
+          });
+          
+          // Update budgets for each category
+          for (const category of categoriesToUpdate) {
+            await updateBudgetSpentAmount(req.userId, category);
+          }
+          
+          // Emit real-time event for transaction updates
+          req.app.emit('transaction-updated', { 
+            userId: req.userId, 
+            action: 'import', 
+            count: insertedCount,
+            categories: Array.from(categoriesToUpdate)
+          });
+        }
       } catch (err) {
         console.error('Fatal insertion error:', err);
         return res.status(500).json({ error: 'Database insertion failed', details: err.message });
@@ -653,26 +676,53 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
 
 app.post('/api/transactions', authenticateToken, async (req, res) => {
   try {
+    console.log('📝 Creating new transaction:', req.body);
     const transactionData = { ...req.body, userId: req.userId };
     const transaction = new Transaction(transactionData);
     await transaction.save();
+    
+    console.log(`✅ Transaction created: ${transaction.description} (${transaction.type}: ${transaction.amount}, category: ${transaction.category})`);
+    
+    // Update budget spent amount for this transaction's category
+    if (transaction.type === 'expense') {
+      console.log('💸 This is an expense transaction, updating budget...');
+      await updateBudgetSpentAmount(req.userId, transaction.category);
+    } else {
+      console.log('💰 This is an income transaction, skipping budget update');
+    }
+    
+    // Emit real-time event
+    req.app.emit('transaction-updated', { userId: req.userId, action: 'create', transaction });
+    
     res.status(201).json(transaction);
   } catch (error) {
+    console.error('❌ Failed to create transaction:', error);
     res.status(500).json({ error: 'Failed to create transaction' });
   }
 });
 
 app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
   try {
+    // Get the transaction before deleting to capture its category and type
+    const transaction = await Transaction.findOne({ _id: req.params.id, userId: req.userId });
+    
+    if (!transaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
     const result = await Transaction.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId },
       { isDeleted: true },
       { new: true }
     );
 
-    if (!result) {
-      return res.status(404).json({ error: 'Transaction not found' });
+    // Update budget spent amount if this was an expense transaction
+    if (transaction.type === 'expense') {
+      await updateBudgetSpentAmount(req.userId, transaction.category);
     }
+
+    // Emit real-time event
+    req.app.emit('transaction-updated', { userId: req.userId, action: 'delete', transaction });
 
     res.json({ success: true, message: 'Transaction deleted successfully' });
   } catch (error) {
@@ -683,6 +733,13 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
   try {
     const { date, amount, type, category, description } = req.body;
+
+    // Get the original transaction before updating
+    const originalTransaction = await Transaction.findOne({ _id: req.params.id, userId: req.userId });
+    
+    if (!originalTransaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
 
     const updatedTransaction = await Transaction.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId },
@@ -696,9 +753,16 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       { new: true, runValidators: true }
     );
 
-    if (!updatedTransaction) {
-      return res.status(404).json({ error: 'Transaction not found' });
+    // Update budget spent amounts for both old and new categories if they're expense transactions
+    if (originalTransaction.type === 'expense') {
+      await updateBudgetSpentAmount(req.userId, originalTransaction.category);
     }
+    if (updatedTransaction.type === 'expense') {
+      await updateBudgetSpentAmount(req.userId, updatedTransaction.category);
+    }
+
+    // Emit real-time event
+    req.app.emit('transaction-updated', { userId: req.userId, action: 'update', transaction: updatedTransaction });
 
     res.json(updatedTransaction);
   } catch (error) {
@@ -774,6 +838,67 @@ app.post('/api/debts/:id/payments', authenticateToken, debtController.addPayment
 app.get('/api/debts/:id/payments', authenticateToken, debtController.getDebtPayments);
 app.patch('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.updatePayment);
 app.delete('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.deletePayment);
+
+// Log all incoming requests to debug
+app.use((req, res, next) => {
+  if (req.path.includes('/api/transactions') && req.method !== 'GET') {
+    console.log(`🔍 ${req.method} ${req.path}`, {
+      body: req.body,
+      headers: req.headers,
+      userId: req.userId
+    });
+  }
+  next();
+});
+
+// Helper function to update budget spent amounts
+const updateBudgetSpentAmount = async (userId, category) => {
+  try {
+    console.log(`🔧 Updating budget spent amount for userId: ${userId}, category: ${category}`);
+    
+    if (!category) {
+      console.log('❌ No category provided, skipping budget update');
+      return;
+    }
+    
+    // Calculate total spent for this category from non-deleted expense transactions
+    const totalSpent = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(userId),
+          category: category,
+          type: 'expense',
+          isDeleted: false
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ]);
+    
+    const spentAmount = totalSpent.length > 0 ? totalSpent[0].total : 0;
+    console.log(`💰 Calculated spent amount for "${category}": ${spentAmount}`);
+    
+    // Update all budgets for this category
+    const updateResult = await Budget.updateMany(
+      { 
+        userId: new mongoose.Types.ObjectId(userId),
+        category: category
+      },
+      { 
+        spent: spentAmount,
+        remaining: { $subtract: ['$amount', spentAmount] }
+      }
+    );
+    
+    console.log(`✅ Updated ${updateResult.modifiedCount} budgets for category "${category}" with spent amount: ${spentAmount}`);
+  } catch (error) {
+    console.error('❌ Error updating budget spent amount:', error);
+  }
+};
 
 // Budget Logic
 const getBudgetStatus = (budget) => {
