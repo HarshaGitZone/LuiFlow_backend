@@ -106,12 +106,14 @@ const Debt = require('./src/models/Debt');
 const DebtPayment = require('./src/models/DebtPayment');
 const Budget = require('./src/models/Budget');
 const ImportHistory = require('./src/models/ImportHistory');
+const Portfolio = require('./src/models/Portfolio');
 
 // Import controllers
 const { register, login, getProfile, updateProfile, updatePassword } = require('./src/controllers/authController');
 const salaryPlannerController = require('./src/controllers/salaryPlannerController');
 const debtController = require('./src/controllers/debtController');
 const analyticsController = require('./src/controllers/analyticsController');
+const portfolioController = require('./src/controllers/portfolioController');
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -838,6 +840,18 @@ app.post('/api/debts/:id/payments', authenticateToken, debtController.addPayment
 app.get('/api/debts/:id/payments', authenticateToken, debtController.getDebtPayments);
 app.patch('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.updatePayment);
 app.delete('/api/debts/:id/payments/:paymentId', authenticateToken, debtController.deletePayment);
+
+// Portfolio Manager Routes
+app.get('/api/portfolio', authenticateToken, portfolioController.getPortfolio);
+app.post('/api/portfolio', authenticateToken, portfolioController.addHolding);
+app.put('/api/portfolio/:id', authenticateToken, portfolioController.updateHolding);
+app.delete('/api/portfolio/:id', authenticateToken, portfolioController.deleteHolding);
+app.post('/api/portfolio/update-prices', authenticateToken, portfolioController.updatePrices);
+app.get('/api/portfolio/analytics', authenticateToken, portfolioController.getPortfolioAnalytics);
+app.get('/api/stocks/search', authenticateToken, portfolioController.searchStocks);
+app.get('/api/stocks/quote/:symbol', authenticateToken, portfolioController.getStockQuote);
+app.get('/api/stocks/historical/:symbol', authenticateToken, portfolioController.getHistoricalData);
+app.get('/api/stocks/overview/:symbol', authenticateToken, portfolioController.getCompanyOverview);
 
 // Log all incoming requests to debug
 app.use((req, res, next) => {
