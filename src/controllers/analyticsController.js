@@ -22,11 +22,6 @@ const getAnalytics = async (req, res) => {
         const start = startDate ? new Date(startDate) : new Date(0);
         const end = endDate ? new Date(endDate) : new Date();
 
-        console.log('Analytics Request:', {
-            userId: userId.toString(),
-            startDate: start.toISOString(),
-            endDate: end.toISOString()
-        });
 
         // Base filter - ensure userId matches ObjectId format
         const filter = {
@@ -152,15 +147,6 @@ const getAnalytics = async (req, res) => {
         const totalUserTransactions = await TransactionModel.countDocuments({ userId, isDeleted: false });
         const matchCount = await TransactionModel.countDocuments(filter);
 
-        console.log('Analytics Data:', {
-            totalUserTransactions,
-            matchCount,
-            totalIncome,
-            totalExpenses,
-            incomeCategories: incomeCategories.length,
-            expenseCategories: expenseCategories.length,
-            trendPoints: trend.length
-        });
 
         res.json({
             summary: {
