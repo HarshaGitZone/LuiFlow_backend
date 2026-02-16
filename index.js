@@ -33,8 +33,6 @@ const connectWithRetry = async (retries = 5, delayMs = 5000) => {
     console.log('Connecting to Mongo host (masked):', maskedHost);
 
     await mongoose.connect(MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
       serverSelectionTimeoutMS: 10000
     });
 
@@ -129,7 +127,7 @@ const portfolioController = require('./src/controllers/portfolioController');
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: process.env.NODE_ENV === 'production' ? 100 : 600,
   message: 'Too many requests from this IP, please try again later.',
   skip: (req) => req.method === 'OPTIONS'
 });
@@ -145,7 +143,9 @@ app.use((req, res, next) => {
 
 app.use(helmet());
 app.use(compression());
-app.use(morgan('combined'));
+if (process.env.ENABLE_HTTP_LOGS === 'true') {
+  app.use(morgan('combined'));
+}
 app.use(limiter);
 
 // Pass Transaction model to debt controller
@@ -663,7 +663,7 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     const transactions = await Transaction.find(filter)
-      .sort({ date: -1 })
+      .sort({ date: -1, createdAt: -1, _id: -1 })
       .skip(skip)
       .limit(limitNum);
 

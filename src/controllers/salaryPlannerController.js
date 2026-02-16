@@ -310,11 +310,19 @@ const updateSubscription = async (req, res) => {
   try {
     const userId = req.userId;
     const { month, subscriptionId, updates } = req.body;
-    
+
+    const setPayload = {};
+    if (updates?.name !== undefined) setPayload['subscriptions.$.name'] = updates.name;
+    if (updates?.provider !== undefined) setPayload['subscriptions.$.provider'] = updates.provider;
+    if (updates?.monthlyCost !== undefined) setPayload['subscriptions.$.monthlyCost'] = updates.monthlyCost;
+    if (updates?.renewalDate !== undefined) setPayload['subscriptions.$.renewalDate'] = updates.renewalDate;
+    if (updates?.category !== undefined) setPayload['subscriptions.$.category'] = updates.category;
+    if (updates?.status !== undefined) setPayload['subscriptions.$.status'] = updates.status;
+
     await SalaryPlanner.findOneAndUpdate(
       { userId, month, 'subscriptions._id': subscriptionId },
-      { $set: { 'subscriptions.$': updates } },
-      { new: true }
+      { $set: setPayload },
+      { new: true, runValidators: true }
     );
     
     res.json({
