@@ -108,7 +108,7 @@ const Budget = require('./src/models/Budget');
 const ImportHistory = require('./src/models/ImportHistory');
 
 // Import controllers
-const { register, login, getProfile, updateProfile } = require('./src/controllers/authController');
+const { register, login, getProfile, updateProfile, updatePassword } = require('./src/controllers/authController');
 const salaryPlannerController = require('./src/controllers/salaryPlannerController');
 const debtController = require('./src/controllers/debtController');
 const analyticsController = require('./src/controllers/analyticsController');
@@ -786,26 +786,8 @@ const getBudgetStatus = (budget) => {
   return 'under';
 };
 
-const ensureDefaultBudgets = async (userId) => {
-  const existingCount = await Budget.countDocuments({ userId });
-  if (existingCount > 0) {
-    return;
-  }
-  const defaults = [
-    { name: 'Food Budget', amount: 15000, spent: 4800, category: 'Food', period: 'Monthly' },
-    { name: 'Subscription Budget', amount: 5000, spent: 1750, category: 'Subscriptions', period: 'Monthly' },
-    { name: 'Convenience Budget', amount: 3500, spent: 950, category: 'Convenience', period: 'Monthly' }
-  ].map((item) => ({
-    ...item,
-    userId,
-    remaining: item.amount - item.spent
-  }));
-  await Budget.insertMany(defaults);
-};
-
 app.get('/api/budgets', authenticateToken, async (req, res) => {
   try {
-    await ensureDefaultBudgets(req.userId);
     const budgets = await Budget.find({ userId: req.userId }).sort({ createdAt: -1 }).lean();
     const withStatus = budgets.map((budget) => ({
       ...budget,
@@ -835,6 +817,10 @@ app.post('/api/budgets', authenticateToken, async (req, res) => {
       category: String(category).trim(),
       period: String(period || 'Monthly').trim()
     });
+    
+    // Emit real-time event
+    req.app.emit('budget-updated', { userId: req.userId, action: 'create', budget: createdBudget });
+    
     res.status(201).json({
       ...createdBudget.toObject(),
       status: getBudgetStatus(createdBudget)
@@ -877,6 +863,10 @@ app.put('/api/budgets/:id', authenticateToken, async (req, res) => {
       updates,
       { new: true, runValidators: true }
     );
+    
+    // Emit real-time event
+    req.app.emit('budget-updated', { userId: req.userId, action: 'update', budget: updatedBudget });
+    
     res.json({
       ...updatedBudget.toObject(),
       status: getBudgetStatus(updatedBudget)
@@ -892,6 +882,10 @@ app.delete('/api/budgets/:id', authenticateToken, async (req, res) => {
     if (!deletedBudget) {
       return res.status(404).json({ error: 'Budget not found' });
     }
+    
+    // Emit real-time event
+    req.app.emit('budget-updated', { userId: req.userId, action: 'delete', budget: deletedBudget });
+    
     res.json({ success: true, message: 'Budget deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete budget' });
@@ -903,6 +897,34 @@ app.post('/api/auth/register', register);
 app.post('/api/auth/login', login);
 app.get('/api/auth/profile', authenticateToken, getProfile);
 app.put('/api/auth/profile', authenticateToken, updateProfile);
+app.put('/api/auth/update-password', authenticateToken, updatePassword);
+
+// Clear All Data Endpoint
+app.delete('/api/clear-all-data', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    // Delete all user data from all collections
+    await Promise.all([
+      Transaction.deleteMany({ userId }),
+      Budget.deleteMany({ userId }),
+      Debt.deleteMany({ userId }),
+      DebtPayment.deleteMany({ userId }),
+      SalaryPlanner.deleteMany({ userId }),
+      ImportHistory.deleteMany({ userId })
+    ]);
+
+    console.log(`All data cleared for user: ${userId}`);
+
+    res.json({
+      message: 'All data cleared successfully',
+      clearedCollections: ['transactions', 'budgets', 'debts', 'debtPayments', 'salaryPlanner', 'importHistory']
+    });
+  } catch (error) {
+    console.error('Error clearing all data:', error);
+    res.status(500).json({ error: 'Failed to clear all data' });
+  }
+});
 
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
