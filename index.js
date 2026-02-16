@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const multer = require('multer');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 require('dotenv').config();
@@ -14,6 +15,12 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finance-tracker';
+const IMPORT_CONCURRENCY = Math.max(1, Number(process.env.IMPORT_CONCURRENCY || 8));
+const MAX_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.MAX_IMPORT_CONCURRENCY || 16));
+const SUMMARY_CACHE_TTL_MS = Math.max(1000, Number(process.env.SUMMARY_CACHE_TTL_MS || 30000));
+const ANALYTICS_CACHE_TTL_MS = Math.max(1000, Number(process.env.ANALYTICS_CACHE_TTL_MS || 30000));
+const summaryCache = new Map();
+const analyticsCache = new Map();
 
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production'
@@ -66,6 +73,60 @@ connectWithRetry();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+const buildCacheKey = (userId, suffix = 'all') => `${String(userId)}::${suffix}`;
+
+const getCachedValue = (cache, key) => {
+  const cached = cache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return cached.value;
+};
+
+const setCachedValue = (cache, key, value, ttlMs) => {
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
+
+const invalidateUserCaches = (userId) => {
+  const prefix = `${String(userId)}::`;
+  for (const key of summaryCache.keys()) {
+    if (key.startsWith(prefix)) summaryCache.delete(key);
+  }
+  for (const key of analyticsCache.keys()) {
+    if (key.startsWith(prefix)) analyticsCache.delete(key);
+  }
+};
+
+const normalizeField = (value) => String(value || '').trim().toLowerCase();
+
+const buildTransactionFingerprint = (transaction) => {
+  const dateIso = transaction.date instanceof Date ? transaction.date.toISOString() : new Date(transaction.date).toISOString();
+  const rawKey = [
+    dateIso,
+    Number(transaction.amount).toFixed(2),
+    normalizeField(transaction.type),
+    normalizeField(transaction.description),
+    normalizeField(transaction.category)
+  ].join('|');
+  return crypto.createHash('sha256').update(rawKey).digest('hex');
+};
+
+const runWithConcurrency = async (items, concurrency, handler) => {
+  let index = 0;
+  const worker = async () => {
+    while (true) {
+      const current = index;
+      index += 1;
+      if (current >= items.length) break;
+      await handler(items[current]);
+    }
+  };
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+};
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -117,6 +178,8 @@ const DebtPayment = require('./src/models/DebtPayment');
 const Budget = require('./src/models/Budget');
 const ImportHistory = require('./src/models/ImportHistory');
 const Portfolio = require('./src/models/Portfolio');
+const { ImportCommitQueue } = require('./src/utils/importCommitQueue');
+const importCommitQueue = new ImportCommitQueue();
 
 // Import controllers
 const { register, login, getProfile, updateProfile, updatePassword } = require('./src/controllers/authController');
@@ -151,7 +214,15 @@ app.use(limiter);
 // Pass Transaction model to debt controller
 app.use((req, res, next) => {
   req.app.locals.Transaction = Transaction;
+  req.app.locals.analyticsCache = analyticsCache;
+  req.app.locals.analyticsCacheTTLms = ANALYTICS_CACHE_TTL_MS;
   next();
+});
+
+app.on('transaction-updated', (payload) => {
+  if (payload?.userId) {
+    invalidateUserCaches(payload.userId);
+  }
 });
 
 // Helper for Robust Date Parsing
@@ -307,9 +378,8 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
               transaction.type = 'expense';
             }
 
-            // Generate unique fingerprint for deduplication
-            const fingerprint = `${transaction.date.toISOString()}-${transaction.amount}-${transaction.type}-${transaction.description}-${transaction.category}`;
-            transaction.fingerprint = fingerprint;
+            // Generate deterministic fingerprint for deduplication
+            transaction.fingerprint = buildTransactionFingerprint(transaction);
 
             results.push(transaction);
           } catch (error) {
@@ -327,29 +397,25 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
 
     console.log(`Processed ${processedRows} rows, ${results.length} valid transactions, ${errors.length} errors`);
 
-    // Removed the complex pre-check/restore logic for simplicity and reliability in this rewrite
-    // We will rely on duplicate key error handling during insert
+    const importSessionId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
 
-    // Insert valid transactions into database
-    let insertedCount = 0;
-    if (results.length > 0) {
-      try {
-        console.log('Attempting to insert', results.length, 'transactions');
-
-        // Single insert (or insertMany with ordered: false)
-        // For debugging: Force individual saves to identify silent failures
-        console.log('Forcing individual saves for debugging...');
-
+    const responseData = await importCommitQueue.enqueue(req.userId, async ({ commitOrder }) => {
+      let insertedCount = 0;
+      if (results.length > 0) {
+        const requestedConcurrency = Number(req.body?.concurrency);
+        const effectiveConcurrency = Number.isFinite(requestedConcurrency)
+          ? Math.max(1, Math.min(MAX_IMPORT_CONCURRENCY, Math.trunc(requestedConcurrency)))
+          : IMPORT_CONCURRENCY;
+        const sortedResults = [...results].sort((a, b) => a.rowNumber - b.rowNumber);
         let individualSuccess = 0;
-        for (const record of results) {
+
+        await runWithConcurrency(sortedResults, effectiveConcurrency, async (record) => {
           try {
-            console.log(`Saving row ${record.rowNumber}...`);
             await new Transaction(record).save();
             individualSuccess++;
             insertedCount++;
           } catch (indErr) {
             if (indErr.code === 11000) {
-              // Handle potential soft-deleted duplicate
               try {
                 const existing = await Transaction.findOne({
                   userId: req.userId,
@@ -368,12 +434,10 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
                     await existing.save();
                     individualSuccess++;
                     insertedCount++;
-                    console.log(`Row ${record.rowNumber} restored from trash`);
                   } else {
                     duplicateRows++;
                   }
                 } else {
-                  console.warn(`Row ${record.rowNumber} collision with another user or system index`);
                   errors.push({ row: record.rowNumber, error: 'Duplicate transaction exists in system' });
                 }
               } catch (findErr) {
@@ -385,92 +449,83 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
               errors.push({ row: record.rowNumber, error: indErr.message });
             }
           }
-        }
-        console.log(`Individual processing finished. Success: ${individualSuccess}, Duplicates: ${duplicateRows}, Errors: ${errors.length}`);
+        });
+        console.log(`Bounded-concurrency import finished. CommitOrder: ${commitOrder}, Concurrency: ${effectiveConcurrency}, Success: ${individualSuccess}, Duplicates: ${duplicateRows}, Errors: ${errors.length}`);
 
-
-
-
-
-
-        console.log('Successfully inserted total of', insertedCount, 'transactions');
-        
-        // Update budget spent amounts for all affected categories
         if (insertedCount > 0) {
           const categoriesToUpdate = new Set();
-          results.forEach(transaction => {
+          results.forEach((transaction) => {
             if (transaction.type === 'expense') {
               categoriesToUpdate.add(transaction.category);
             }
           });
-          
-          // Update budgets for each category
+
           for (const category of categoriesToUpdate) {
             await updateBudgetSpentAmount(req.userId, category);
           }
-          
-          // Emit real-time event for transaction updates
-          req.app.emit('transaction-updated', { 
-            userId: req.userId, 
-            action: 'import', 
+
+          req.app.emit('transaction-updated', {
+            userId: req.userId,
+            action: 'import',
             count: insertedCount,
             categories: Array.from(categoriesToUpdate)
           });
         }
-      } catch (err) {
-        console.error('Fatal insertion error:', err);
-        return res.status(500).json({ error: 'Database insertion failed', details: err.message });
       }
-    }
 
-    // Determine status logic
-    let status = 'failed';
-    if (errors.length === 0) {
-      if (insertedCount > 0 || duplicateRows > 0) {
-        status = 'success';
+      let status = 'failed';
+      if (errors.length === 0) {
+        if (insertedCount > 0 || duplicateRows > 0) {
+          status = 'success';
+        }
+      } else if (insertedCount > 0 || duplicateRows > 0) {
+        status = 'partial';
       }
-    } else if (insertedCount > 0 || duplicateRows > 0) {
-      status = 'partial';
-    }
 
-    // Save Import History
-    try {
-      await ImportHistory.create({
-        userId: req.userId,
-        fileName: req.file.originalname,
-        status: status,
+      try {
+        await ImportHistory.create({
+          userId: req.userId,
+          fileName: req.file.originalname,
+          importSessionId,
+          commitOrder,
+          commitPolicy: 'per-user-serialized',
+          status,
+          summary: {
+            totalRows: processedRows,
+            insertedRows: insertedCount,
+            skippedRows,
+            duplicateRows,
+            errors: errors.length
+          }
+        });
+      } catch (histError) {
+        console.error('Failed to save import history:', histError);
+      }
+
+      return {
+        success: status === 'success' || status === 'partial',
+        commit: {
+          importSessionId,
+          commitOrder,
+          policy: 'per-user-serialized'
+        },
         summary: {
           totalRows: processedRows,
           insertedRows: insertedCount,
           skippedRows,
           duplicateRows,
           errors: errors.length
+        },
+        errors: errors.slice(0, 50),
+        debug: {
+          userId: req.userId,
+          resultsLength: results.length,
+          processedRows,
+          duplicateRows,
+          insertedCount
         }
-      });
-    } catch (histError) {
-      console.error('Failed to save import history:', histError);
-      // Don't fail the request if history save fails
-    }
-
-    const responseData = {
-      success: status === 'success' || status === 'partial',
-      summary: {
-        totalRows: processedRows,
-        insertedRows: insertedCount,
-        skippedRows,
-        duplicateRows,
-        errors: errors.length
-      },
-      errors: errors.slice(0, 50), // Return more errors for debugging
-      debug: {
-        userId: req.userId,
-        resultsLength: results.length,
-        processedRows,
-        duplicateRows,
-        insertedCount,
-        sampleTransaction: results.length > 0 ? results[0] : null
-      }
-    };
+      };
+    });
 
     console.log('Sending response:', responseData);
     res.status(200).json(responseData);
@@ -547,8 +602,7 @@ app.post('/api/csv/dry-run', authenticateToken, upload.single('file'), async (re
               transaction.type = 'expense';
             }
 
-            const fingerprint = `${transaction.date.toISOString()}-${transaction.amount}-${transaction.type}-${transaction.description}-${transaction.category}`;
-            transaction.fingerprint = fingerprint;
+            transaction.fingerprint = buildTransactionFingerprint(transaction);
 
             allTransactions.push(transaction);
           } catch (error) {
@@ -781,8 +835,19 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
 
 app.get('/api/transactions/summary', authenticateToken, async (req, res) => {
   try {
+    const cacheKey = buildCacheKey(req.userId, 'transactions-summary');
+    const cachedSummary = getCachedValue(summaryCache, cacheKey);
+    if (cachedSummary) {
+      return res.json(cachedSummary);
+    }
+
+    let userId = req.userId;
+    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+      userId = new mongoose.Types.ObjectId(userId);
+    }
+
     const summary = await Transaction.aggregate([
-      { $match: { isDeleted: false, userId: req.userId } },
+      { $match: { isDeleted: false, userId } },
       {
         $group: {
           _id: '$type',
@@ -800,11 +865,14 @@ app.get('/api/transactions/summary', authenticateToken, async (req, res) => {
       if (item._id === 'expense') totalExpenses = item.total;
     });
 
-    res.json({
+    const payload = {
       totalIncome,
       totalExpenses,
       netFlow: totalIncome - totalExpenses
-    });
+    };
+
+    setCachedValue(summaryCache, cacheKey, payload, SUMMARY_CACHE_TTL_MS);
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch summary' });
   }
@@ -1059,6 +1127,7 @@ app.delete('/api/clear-all-data', authenticateToken, async (req, res) => {
       SalaryPlanner.deleteMany({ userId }),
       ImportHistory.deleteMany({ userId })
     ]);
+    invalidateUserCaches(userId);
 
     console.log(`All data cleared for user: ${userId}`);
 

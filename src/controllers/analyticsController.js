@@ -1,5 +1,43 @@
 const mongoose = require('mongoose');
 
+const buildAnalyticsCacheKey = (userId, startIso, endIso) => `${String(userId)}::analytics::${startIso}::${endIso}`;
+
+const detectExpenseSpikes = (trend) => {
+    if (!Array.isArray(trend) || trend.length < 3) {
+        return [];
+    }
+
+    const expenses = trend.map((entry) => Number(entry.expenses) || 0);
+    const mean = expenses.reduce((sum, value) => sum + value, 0) / expenses.length;
+    const variance = expenses.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / expenses.length;
+    const stdDev = Math.sqrt(variance);
+
+    return trend
+        .filter((entry) => {
+            const value = Number(entry.expenses) || 0;
+            if (value <= 0) return false;
+            const zSpike = stdDev > 0 && value > mean + (2 * stdDev);
+            const ratioSpike = mean > 0 && value >= (mean * 1.75);
+            return zSpike || ratioSpike;
+        })
+        .map((entry) => {
+            const value = Number(entry.expenses) || 0;
+            const ratio = mean > 0 ? Number((value / mean).toFixed(2)) : null;
+            const delta = Number((value - mean).toFixed(2));
+            return {
+                key: entry.key,
+                name: entry.name,
+                expenses: value,
+                averageExpenses: Number(mean.toFixed(2)),
+                deltaFromAverage: delta,
+                ratioToAverage: ratio,
+                severity: ratio !== null && ratio >= 2.5 ? 'high' : 'medium'
+            };
+        })
+        .sort((a, b) => b.expenses - a.expenses)
+        .slice(0, 5);
+};
+
 const getAnalytics = async (req, res) => {
     try {
         const { startDate, endDate } = req.query;
@@ -21,6 +59,21 @@ const getAnalytics = async (req, res) => {
         // Define date ranges
         const start = startDate ? new Date(startDate) : new Date(0);
         const end = endDate ? new Date(endDate) : new Date();
+        const startIso = start.toISOString();
+        const endIso = end.toISOString();
+        const cache = req.app.locals.analyticsCache;
+        const cacheTtlMs = req.app.locals.analyticsCacheTTLms || 30000;
+        const cacheKey = buildAnalyticsCacheKey(userId, startIso, endIso);
+
+        if (cache) {
+            const cached = cache.get(cacheKey);
+            if (cached && cached.expiresAt > Date.now()) {
+                return res.json(cached.value);
+            }
+            if (cached && cached.expiresAt <= Date.now()) {
+                cache.delete(cacheKey);
+            }
+        }
 
 
         // Base filter - ensure userId matches ObjectId format
@@ -142,32 +195,41 @@ const getAnalytics = async (req, res) => {
 
         const trend = Array.from(trendMap.values())
             .sort((a, b) => a.key.localeCompare(b.key));
+        const unusualSpikes = detectExpenseSpikes(trend);
 
         // Debug: Get total count for user without date filter
         const totalUserTransactions = await TransactionModel.countDocuments({ userId, isDeleted: false });
         const matchCount = await TransactionModel.countDocuments(filter);
 
 
-        res.json({
+        const payload = {
             summary: {
                 totalIncome,
                 totalExpenses,
                 netFlow,
                 savingsRate,
                 incomeCount,
-                expenseCount
+                expenseCount,
+                unusualSpikeCount: unusualSpikes.length
             },
             incomeCategories,
             expenseCategories,
             trend,
+            unusualSpikes,
             debug: {
                 userId: userId.toString(),
                 totalUserTransactions,
                 matchCount,
-                startDate: start.toISOString(),
-                endDate: end.toISOString()
+                startDate: startIso,
+                endDate: endIso
             }
-        });
+        };
+
+        if (cache) {
+            cache.set(cacheKey, { value: payload, expiresAt: Date.now() + cacheTtlMs });
+        }
+
+        res.json(payload);
 
     } catch (error) {
         console.error('Analytics Error:', error);

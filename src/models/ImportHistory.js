@@ -10,6 +10,17 @@ const importHistorySchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    importSessionId: {
+        type: String
+    },
+    commitOrder: {
+        type: Number
+    },
+    commitPolicy: {
+        type: String,
+        enum: ['per-user-serialized'],
+        default: 'per-user-serialized'
+    },
     status: {
         type: String,
         enum: ['success', 'failed', 'partial'],
@@ -28,5 +39,6 @@ const importHistorySchema = new mongoose.Schema({
 
 // Index for fast retrieval by user and date
 importHistorySchema.index({ userId: 1, importDate: -1 });
+importHistorySchema.index({ userId: 1, commitOrder: -1 });
 
 module.exports = mongoose.model('ImportHistory', importHistorySchema);
