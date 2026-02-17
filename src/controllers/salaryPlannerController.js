@@ -59,7 +59,6 @@ const createEmptyPlannerDoc = (userId, month) => ({
   fixedBills: [],
   variableExpenses: { categories: [], totalSpent: 0 },
   savingsGoals: [],
-  purchaseGoals: [],
   subscriptions: [],
   cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
 });
@@ -99,13 +98,18 @@ const getSalaryPlanner = async (req, res) => {
           totalSpent: 0
         },
         savingsGoals: [],
-        purchaseGoals: [],
         subscriptions: [],
         cumulativeSavings: {
           totalSaved: 0,
           monthlyHistory: []
         }
       });
+      
+      // Initialize purchaseGoals if it doesn't exist
+      if (!defaultPlanner.purchaseGoals) {
+        defaultPlanner.purchaseGoals = [];
+        await defaultPlanner.save();
+      }
       
       await defaultPlanner.save();
       planner = defaultPlanner;
@@ -193,13 +197,18 @@ const updateSalaryPlanner = async (req, res) => {
           fixedBills: [],
           subscriptions: [],
           savingsGoals: [],
-          purchaseGoals: [],
           variableExpenses: { categories: [], totalSpent: 0 },
           cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
         }
       },
       { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
     );
+
+    // Initialize purchaseGoals if it doesn't exist
+    if (!planner.purchaseGoals) {
+      planner.purchaseGoals = [];
+      await planner.save();
+    }
 
     // Initialize salary if it doesn't exist
     if (!planner.salary) {
