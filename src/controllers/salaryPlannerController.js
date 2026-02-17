@@ -1,4 +1,56 @@
+const mongoose = require('mongoose');
 const SalaryPlanner = require('../models/SalaryPlanner');
+
+const buildMonthRange = (month) => {
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return null;
+  }
+  const [yearStr, monthStr] = month.split('-');
+  const year = Number(yearStr);
+  const monthIndex = Number(monthStr) - 1;
+  const monthStart = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
+  const nextMonthStart = new Date(Date.UTC(year, monthIndex + 1, 1, 0, 0, 0, 0));
+  return { monthStart, nextMonthStart };
+};
+
+const getMonthlyTransactionFlow = async (req, month) => {
+  const range = buildMonthRange(month);
+  if (!range) {
+    return { totalIncome: 0, totalExpenses: 0, netFlow: 0 };
+  }
+
+  const Transaction =
+    req.app?.locals?.Transaction || mongoose.model('Transaction');
+
+  const summary = await Transaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(req.userId),
+        isDeleted: false,
+        date: { $gte: range.monthStart, $lt: range.nextMonthStart }
+      }
+    },
+    {
+      $group: {
+        _id: '$type',
+        total: { $sum: '$amount' }
+      }
+    }
+  ]);
+
+  let totalIncome = 0;
+  let totalExpenses = 0;
+  for (const row of summary) {
+    if (row._id === 'income') totalIncome = Number(row.total) || 0;
+    if (row._id === 'expense') totalExpenses = Number(row.total) || 0;
+  }
+
+  return {
+    totalIncome,
+    totalExpenses,
+    netFlow: totalIncome - totalExpenses
+  };
+};
 
 const createEmptyPlannerDoc = (userId, month) => ({
   userId,
@@ -57,9 +109,15 @@ const getSalaryPlanner = async (req, res) => {
       planner = defaultPlanner;
     }
     
+    const targetMonth = planner?.month || month || new Date().toISOString().slice(0, 7);
+    const transactionFlow = await getMonthlyTransactionFlow(req, targetMonth);
+
     res.json({
       success: true,
-      data: planner
+      data: {
+        ...planner.toObject(),
+        transactionFlow
+      }
     });
   } catch (error) {
     console.error('Error fetching salary planner:', error);
@@ -556,7 +614,7 @@ const getSubscriptionSummary = async (req, res) => {
 const updateCumulativeSavings = async (req, res) => {
   try {
     const userId = req.userId;
-    const { month, saved, goalsCompleted, manualSaved = 0 } = req.body;
+    const { month, saved, goalsCompleted, manualSaved } = req.body;
     
     const planner = await SalaryPlanner.findOne({ userId, month });
     if (!planner) {
@@ -574,52 +632,53 @@ const updateCumulativeSavings = async (req, res) => {
     
     let totalSaved = 0;
     let totalManualSaved = 0;
-    const monthlyHistory = [];
+    const nextMonthlyHistory = [];
     
     // Recalculate cumulative savings
     for (const p of allPlanners) {
-      const monthSaved = p.savingsGoals.reduce((sum, goal) => sum + (goal.savedAmount || 0), 0);
+      const goalSaved = p.savingsGoals.reduce((sum, goal) => sum + (goal.savedAmount || 0), 0);
       const monthGoalsCompleted = p.savingsGoals.filter(goal => 
         goal.savedAmount >= goal.targetAmount
       ).length;
-      
-      // Use provided manualSaved for current month, otherwise use existing
-      const currentManualSaved = p.month === month ? manualSaved : 
-        (p.cumulativeSavings?.monthlyHistory?.find(h => h.month === p.month)?.manualSaved || 0);
-      
-      totalSaved += monthSaved;
+
+      const existingHistory = p.cumulativeSavings?.monthlyHistory?.find(h => h.month === p.month);
+
+      const parsedSaved = Number(saved);
+      const hasSavedUpdate = p.month === month && Number.isFinite(parsedSaved);
+
+      const parsedManualSaved = Number(manualSaved);
+      const hasManualSavedUpdate = p.month === month && Number.isFinite(parsedManualSaved);
+
+      const currentManualSaved = hasManualSavedUpdate
+        ? parsedManualSaved
+        : Number(existingHistory?.manualSaved || 0);
+
+      const currentMonthSaved = hasSavedUpdate
+        ? parsedSaved
+        : Number(existingHistory?.saved ?? goalSaved);
+
+      totalSaved += currentMonthSaved;
       totalManualSaved += currentManualSaved;
-      
-      // Update or add to history
-      const existingIndex = planner.cumulativeSavings?.monthlyHistory?.findIndex(
-        h => h.month === p.month
-      );
-      
-      if (existingIndex >= 0) {
-        planner.cumulativeSavings.monthlyHistory[existingIndex] = {
-          month: p.month,
-          saved: monthSaved,
-          manualSaved: currentManualSaved,
-          goalsCompleted: monthGoalsCompleted
-        };
-      } else {
-        planner.cumulativeSavings.monthlyHistory.push({
-          month: p.month,
-          saved: monthSaved,
-          manualSaved: currentManualSaved,
-          goalsCompleted: monthGoalsCompleted
-        });
-      }
+
+      nextMonthlyHistory.push({
+        month: p.month,
+        saved: currentMonthSaved,
+        manualSaved: currentManualSaved,
+        goalsCompleted: p.month === month && Number.isFinite(Number(goalsCompleted))
+          ? Number(goalsCompleted)
+          : monthGoalsCompleted
+      });
     }
-    
-    planner.cumulativeSavings.totalSaved = totalSaved + totalManualSaved;
+
+    planner.cumulativeSavings.monthlyHistory = nextMonthlyHistory;
+    planner.cumulativeSavings.totalSaved = totalSaved;
     planner.cumulativeSavings.manualSavings = totalManualSaved;
     await planner.save();
     
     res.json({
       success: true,
       data: {
-        totalSaved: totalSaved + totalManualSaved,
+        totalSaved,
         manualSavings: totalManualSaved,
         monthlyHistory: planner.cumulativeSavings.monthlyHistory
       }
