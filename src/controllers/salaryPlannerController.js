@@ -1,5 +1,16 @@
 const SalaryPlanner = require('../models/SalaryPlanner');
 
+const createEmptyPlannerDoc = (userId, month) => ({
+  userId,
+  month,
+  salary: { amount: 0, creditDate: '01', month },
+  fixedBills: [],
+  variableExpenses: { categories: [], totalSpent: 0 },
+  savingsGoals: [],
+  subscriptions: [],
+  cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
+});
+
 // Get salary planner data for a specific month
 const getSalaryPlanner = async (req, res) => {
   try {
@@ -20,13 +31,8 @@ const getSalaryPlanner = async (req, res) => {
       const defaultPlanner = new SalaryPlanner({
         userId,
         month: month || new Date().toISOString().slice(0, 7),
-        salary: { amount: 45000, creditDate: '01', month: month || new Date().toISOString().slice(0, 7) },
-        fixedBills: [
-          { name: 'Rent', amount: 15000, dueDate: '01', status: 'unpaid' },
-          { name: 'Electricity', amount: 2000, dueDate: '10', status: 'unpaid' },
-          { name: 'Internet', amount: 1000, dueDate: '15', status: 'unpaid' },
-          { name: 'Mobile Recharge', amount: 500, dueDate: '01', status: 'unpaid' }
-        ],
+        salary: { amount: 0, creditDate: '01', month: month || new Date().toISOString().slice(0, 7) },
+        fixedBills: [],
         variableExpenses: {
           categories: [
             { name: 'Groceries', budgetAmount: 8000, currentSpent: 0 },
@@ -39,22 +45,11 @@ const getSalaryPlanner = async (req, res) => {
           ],
           totalSpent: 0
         },
-        savingsGoals: [
-          { title: 'Emergency Fund', targetAmount: 50000, targetDate: new Date(Date.now() + 6*30*24*60*60*1000), savedAmount: 0, monthlyContribution: 5000 },
-          { title: 'New Laptop', targetAmount: 80000, targetDate: new Date(Date.now() + 12*30*24*60*60*1000), savedAmount: 0, monthlyContribution: 6000 }
-        ],
-        subscriptions: [
-          { name: 'Netflix Premium', provider: 'Netflix', monthlyCost: 649, renewalDate: '15', category: 'Entertainment', status: 'active', autoRenewal: true },
-          { name: 'Spotify Premium', provider: 'Spotify', monthlyCost: 119, renewalDate: '22', category: 'Entertainment', status: 'active', autoRenewal: true },
-          { name: 'Amazon Prime', provider: 'Amazon', monthlyCost: 179, renewalDate: '08', category: 'Shopping', status: 'active', autoRenewal: true }
-        ],
+        savingsGoals: [],
+        subscriptions: [],
         cumulativeSavings: {
-          totalSaved: 11000,
-          monthlyHistory: [
-            { month: '2025-10', saved: 3000, goalsCompleted: 0 },
-            { month: '2025-11', saved: 4500, goalsCompleted: 1 },
-            { month: '2025-12', saved: 3500, goalsCompleted: 0 }
-          ]
+          totalSaved: 0,
+          monthlyHistory: []
         }
       });
       
@@ -80,12 +75,75 @@ const updateSalaryPlanner = async (req, res) => {
   try {
     const userId = req.userId;
     const { month, updates } = req.body;
-    
+
+    if (!month || typeof month !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Month is required in YYYY-MM format'
+      });
+    }
+
+    if (!updates || typeof updates !== 'object') {
+      return res.status(400).json({
+        success: false,
+        error: 'Updates payload is required'
+      });
+    }
+
+    const setPayload = {};
+
+    if (updates.salary !== undefined) {
+      if (updates.salary.amount !== undefined) {
+        const parsedAmount = Number(updates.salary.amount);
+        if (isNaN(parsedAmount) || parsedAmount < 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Salary amount must be a valid non-negative number'
+          });
+        }
+        setPayload['salary.amount'] = parsedAmount;
+      }
+      if (updates.salary.creditDate !== undefined) {
+        setPayload['salary.creditDate'] = String(updates.salary.creditDate).padStart(2, '0');
+      }
+      setPayload['salary.month'] = month;
+    }
+
+    if (updates.fixedBills !== undefined) setPayload.fixedBills = updates.fixedBills;
+    if (updates.variableExpenses !== undefined) setPayload.variableExpenses = updates.variableExpenses;
+    if (updates.savingsGoals !== undefined) setPayload.savingsGoals = updates.savingsGoals;
+    if (updates.subscriptions !== undefined) setPayload.subscriptions = updates.subscriptions;
+    if (updates.cumulativeSavings !== undefined) setPayload.cumulativeSavings = updates.cumulativeSavings;
+
+    if (Object.keys(setPayload).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid fields provided to update'
+      });
+    }
+
     const planner = await SalaryPlanner.findOneAndUpdate(
       { userId, month },
-      updates,
-      { new: true, upsert: true }
+      {
+        $set: setPayload,
+        $setOnInsert: {
+          userId,
+          month,
+          fixedBills: [],
+          subscriptions: [],
+          savingsGoals: [],
+          variableExpenses: { categories: [], totalSpent: 0 },
+          cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
+        }
+      },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
     );
+
+    // Initialize salary if it doesn't exist
+    if (!planner.salary) {
+      planner.salary = { amount: 0, creditDate: '01', month };
+      await planner.save();
+    }
     
     res.json({
       success: true,
@@ -93,6 +151,12 @@ const updateSalaryPlanner = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating salary planner:', error);
+    if (error?.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Invalid salary planner data'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'Failed to update salary planner data'
@@ -130,12 +194,40 @@ const updateFixedBill = async (req, res) => {
   try {
     const userId = req.userId;
     const { month, billId, updates } = req.body;
-    
-    await SalaryPlanner.findOneAndUpdate(
+    const setPayload = {};
+    if (updates?.name !== undefined) setPayload['fixedBills.$.name'] = updates.name;
+    if (updates?.amount !== undefined) setPayload['fixedBills.$.amount'] = updates.amount;
+    if (updates?.dueDate !== undefined) setPayload['fixedBills.$.dueDate'] = updates.dueDate;
+    if (updates?.status !== undefined) setPayload['fixedBills.$.status'] = updates.status;
+    if (updates?.notes !== undefined) setPayload['fixedBills.$.notes'] = updates.notes;
+
+    if (Object.keys(setPayload).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No fixed bill fields provided to update'
+      });
+    }
+
+    let planner = await SalaryPlanner.findOneAndUpdate(
       { userId, month, 'fixedBills._id': billId },
-      { $set: { 'fixedBills.$': updates } },
-      { new: true }
+      { $set: setPayload },
+      { new: true, runValidators: true }
     );
+
+    if (!planner) {
+      planner = await SalaryPlanner.findOneAndUpdate(
+        { userId, 'fixedBills._id': billId },
+        { $set: setPayload },
+        { new: true, runValidators: true }
+      );
+    }
+
+    if (!planner) {
+      return res.status(404).json({
+        success: false,
+        error: 'Fixed bill not found for the selected month'
+      });
+    }
     
     res.json({
       success: true,
@@ -285,12 +377,21 @@ const addSubscription = async (req, res) => {
   try {
     const userId = req.userId;
     const { month, subscription } = req.body;
-    
-    await SalaryPlanner.findOneAndUpdate(
-      { userId, month },
-      { $push: { subscriptions: subscription } },
-      { new: true, upsert: true }
-    );
+
+    if (!month || !subscription || typeof subscription !== 'object') {
+      return res.status(400).json({
+        success: false,
+        error: 'Month and subscription payload are required'
+      });
+    }
+
+    let planner = await SalaryPlanner.findOne({ userId, month });
+    if (!planner) {
+      planner = new SalaryPlanner(createEmptyPlannerDoc(userId, month));
+    }
+
+    planner.subscriptions.push(subscription);
+    await planner.save();
     
     res.json({
       success: true,
@@ -298,6 +399,12 @@ const addSubscription = async (req, res) => {
     });
   } catch (error) {
     console.error('Error adding subscription:', error);
+    if (error?.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Invalid subscription data'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'Failed to add subscription'
@@ -311,19 +418,44 @@ const updateSubscription = async (req, res) => {
     const userId = req.userId;
     const { month, subscriptionId, updates } = req.body;
 
-    const setPayload = {};
-    if (updates?.name !== undefined) setPayload['subscriptions.$.name'] = updates.name;
-    if (updates?.provider !== undefined) setPayload['subscriptions.$.provider'] = updates.provider;
-    if (updates?.monthlyCost !== undefined) setPayload['subscriptions.$.monthlyCost'] = updates.monthlyCost;
-    if (updates?.renewalDate !== undefined) setPayload['subscriptions.$.renewalDate'] = updates.renewalDate;
-    if (updates?.category !== undefined) setPayload['subscriptions.$.category'] = updates.category;
-    if (updates?.status !== undefined) setPayload['subscriptions.$.status'] = updates.status;
+    if (!subscriptionId || !updates || typeof updates !== 'object') {
+      return res.status(400).json({
+        success: false,
+        error: 'Subscription ID and update payload are required'
+      });
+    }
 
-    await SalaryPlanner.findOneAndUpdate(
-      { userId, month, 'subscriptions._id': subscriptionId },
-      { $set: setPayload },
-      { new: true, runValidators: true }
-    );
+    let planner = null;
+    if (month) {
+      planner = await SalaryPlanner.findOne({ userId, month, 'subscriptions._id': subscriptionId });
+    }
+    if (!planner) {
+      planner = await SalaryPlanner.findOne({ userId, 'subscriptions._id': subscriptionId });
+    }
+
+    if (!planner) {
+      return res.status(404).json({
+        success: false,
+        error: 'Subscription not found for the selected month'
+      });
+    }
+
+    const subDoc = planner.subscriptions.id(subscriptionId);
+    if (!subDoc) {
+      return res.status(404).json({
+        success: false,
+        error: 'Subscription not found'
+      });
+    }
+
+    if (updates.name !== undefined) subDoc.name = updates.name;
+    if (updates.provider !== undefined) subDoc.provider = updates.provider;
+    if (updates.monthlyCost !== undefined) subDoc.monthlyCost = updates.monthlyCost;
+    if (updates.renewalDate !== undefined) subDoc.renewalDate = updates.renewalDate;
+    if (updates.category !== undefined) subDoc.category = updates.category;
+    if (updates.status !== undefined) subDoc.status = updates.status;
+
+    await planner.save();
     
     res.json({
       success: true,
@@ -331,6 +463,12 @@ const updateSubscription = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating subscription:', error);
+    if (error?.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Invalid subscription update data'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'Failed to update subscription'
