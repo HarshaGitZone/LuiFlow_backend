@@ -408,42 +408,71 @@ app.post('/api/csv/import', authenticateToken, upload.single('file'), async (req
           : IMPORT_CONCURRENCY;
         const sortedResults = [...results].sort((a, b) => a.rowNumber - b.rowNumber);
         let individualSuccess = 0;
+        const uniqueFingerprints = Array.from(new Set(sortedResults.map((record) => record.fingerprint)));
+        let existingTransactions = [];
+        try {
+          existingTransactions = await Transaction.find({
+            userId: req.userId,
+            fingerprint: { $in: uniqueFingerprints }
+          }).maxTimeMS(15000);
+        } catch (findExistingErr) {
+          console.error('Failed to prefetch existing transactions for dedupe:', findExistingErr.message);
+        }
 
-        await runWithConcurrency(sortedResults, effectiveConcurrency, async (record) => {
+        const existingByFingerprint = new Map(
+          existingTransactions.map((existingTx) => [existingTx.fingerprint, existingTx])
+        );
+        const seenNewFingerprints = new Set();
+        const rowsToInsert = [];
+        const rowsToRestore = [];
+
+        for (const record of sortedResults) {
+          const existing = existingByFingerprint.get(record.fingerprint);
+          if (existing) {
+            if (existing.isDeleted) {
+              rowsToRestore.push({ existing, record });
+              existing.isDeleted = false;
+            } else {
+              duplicateRows++;
+            }
+            continue;
+          }
+
+          if (seenNewFingerprints.has(record.fingerprint)) {
+            duplicateRows++;
+            continue;
+          }
+
+          seenNewFingerprints.add(record.fingerprint);
+          rowsToInsert.push(record);
+        }
+
+        for (const restoreItem of rowsToRestore) {
+          try {
+            const { existing, record } = restoreItem;
+            existing.isDeleted = false;
+            existing.amount = record.amount;
+            existing.date = record.date;
+            existing.type = record.type;
+            existing.category = record.category;
+            existing.description = record.description;
+            await existing.save();
+            individualSuccess++;
+            insertedCount++;
+          } catch (restoreErr) {
+            console.error(`Failed to restore deleted duplicate for row ${restoreItem.record.rowNumber}:`, restoreErr.message);
+            errors.push({ row: restoreItem.record.rowNumber, error: restoreErr.message });
+          }
+        }
+
+        await runWithConcurrency(rowsToInsert, effectiveConcurrency, async (record) => {
           try {
             await new Transaction(record).save();
             individualSuccess++;
             insertedCount++;
           } catch (indErr) {
             if (indErr.code === 11000) {
-              try {
-                const existing = await Transaction.findOne({
-                  userId: req.userId,
-                  fingerprint: record.fingerprint
-                });
-
-                if (existing) {
-                  if (existing.isDeleted) {
-                    existing.isDeleted = false;
-                    existing.amount = record.amount;
-                    existing.date = record.date;
-                    existing.type = record.type;
-                    existing.category = record.category;
-                    existing.description = record.description;
-
-                    await existing.save();
-                    individualSuccess++;
-                    insertedCount++;
-                  } else {
-                    duplicateRows++;
-                  }
-                } else {
-                  errors.push({ row: record.rowNumber, error: 'Duplicate transaction exists in system' });
-                }
-              } catch (findErr) {
-                console.error('Error checking duplicate:', findErr);
-                duplicateRows++;
-              }
+              duplicateRows++;
             } else {
               console.error(`Individual save error for row ${record.rowNumber}:`, indErr.message);
               errors.push({ row: record.rowNumber, error: indErr.message });
