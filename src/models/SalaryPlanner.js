@@ -39,6 +39,12 @@ const salaryPlannerSchema = new mongoose.Schema({
     monthlyContribution: { type: Number, default: 0 },
     status: { type: String, enum: ['active', 'completed', 'paused'], default: 'active' }
   }],
+
+  // Manual purchase goals (items to buy from savings)
+  purchaseGoals: [{
+    name: { type: String, required: true },
+    amount: { type: Number, required: true, min: 0 }
+  }],
   
   // Subscriptions Manager
   subscriptions: [{

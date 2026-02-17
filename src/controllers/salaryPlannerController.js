@@ -59,6 +59,7 @@ const createEmptyPlannerDoc = (userId, month) => ({
   fixedBills: [],
   variableExpenses: { categories: [], totalSpent: 0 },
   savingsGoals: [],
+  purchaseGoals: [],
   subscriptions: [],
   cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
 });
@@ -98,6 +99,7 @@ const getSalaryPlanner = async (req, res) => {
           totalSpent: 0
         },
         savingsGoals: [],
+        purchaseGoals: [],
         subscriptions: [],
         cumulativeSavings: {
           totalSaved: 0,
@@ -170,6 +172,7 @@ const updateSalaryPlanner = async (req, res) => {
     if (updates.fixedBills !== undefined) setPayload.fixedBills = updates.fixedBills;
     if (updates.variableExpenses !== undefined) setPayload.variableExpenses = updates.variableExpenses;
     if (updates.savingsGoals !== undefined) setPayload.savingsGoals = updates.savingsGoals;
+    if (updates.purchaseGoals !== undefined) setPayload.purchaseGoals = updates.purchaseGoals;
     if (updates.subscriptions !== undefined) setPayload.subscriptions = updates.subscriptions;
     if (updates.cumulativeSavings !== undefined) setPayload.cumulativeSavings = updates.cumulativeSavings;
 
@@ -190,6 +193,7 @@ const updateSalaryPlanner = async (req, res) => {
           fixedBills: [],
           subscriptions: [],
           savingsGoals: [],
+          purchaseGoals: [],
           variableExpenses: { categories: [], totalSpent: 0 },
           cumulativeSavings: { totalSaved: 0, manualSavings: 0, monthlyHistory: [] }
         }
