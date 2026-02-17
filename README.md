@@ -297,8 +297,10 @@ npm run preview
 
 ---
 ## Database Schema
-Core Collections
-Users Collection
+### Core Collections
+---
+### Users Collection
+```js
 {
   _id: ObjectId,
   name: String (required, max 50 chars),
@@ -420,6 +422,8 @@ Import History Collection
   },
   createdAt: Date
 }
+```
+---
 
 ## Deployment
 
