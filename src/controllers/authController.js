@@ -4,6 +4,8 @@ const User = require('../models/User');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
 // Generate JWT token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
@@ -13,9 +15,10 @@ const generateToken = (userId) => {
 const register = async (req, res) => {
   try {
     const { name, email, password } = req.body;
+    const normalizedEmail = normalizeEmail(email);
 
     // Validate input
-    if (!name || !email || !password) {
+    if (!name || !normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide all required fields'
@@ -43,7 +46,7 @@ const register = async (req, res) => {
     }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -58,7 +61,7 @@ const register = async (req, res) => {
     // Create new user
     const user = new User({
       name,
-      email,
+      email: normalizedEmail,
       password: hashedPassword
     });
 
@@ -96,9 +99,10 @@ const register = async (req, res) => {
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
+    const normalizedEmail = normalizeEmail(email);
 
     // Validate input
-    if (!email || !password) {
+    if (!normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide email and password'
@@ -106,7 +110,7 @@ const login = async (req, res) => {
     }
 
     // Find user
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -191,6 +195,7 @@ const getProfile = async (req, res) => {
 const updateProfile = async (req, res) => {
   try {
     const { name, email, phone, bio, avatar } = req.body;
+    const normalizedEmail = email ? normalizeEmail(email) : null;
 
     // Find user
     const user = await User.findById(req.userId);
@@ -202,8 +207,8 @@ const updateProfile = async (req, res) => {
     }
 
     // Check if email is being changed and if it's already taken
-    if (email && email !== user.email) {
-      const existingUser = await User.findOne({ email });
+    if (normalizedEmail && normalizedEmail !== user.email) {
+      const existingUser = await User.findOne({ email: normalizedEmail });
       if (existingUser) {
         return res.status(400).json({
           success: false,
@@ -214,7 +219,7 @@ const updateProfile = async (req, res) => {
 
     // Update user fields
     if (name) user.name = name;
-    if (email) user.email = email;
+    if (normalizedEmail) user.email = normalizedEmail;
     if (phone !== undefined) user.phone = phone;
     if (bio !== undefined) user.bio = bio;
     if (avatar !== undefined) user.avatar = avatar;

@@ -22,6 +22,16 @@ const ANALYTICS_CACHE_TTL_MS = Math.max(1000, Number(process.env.ANALYTICS_CACHE
 const summaryCache = new Map();
 const analyticsCache = new Map();
 
+const trustProxyConfig = process.env.TRUST_PROXY ?? (process.env.NODE_ENV === 'production' ? '1' : '0');
+if (trustProxyConfig === 'true') {
+  app.set('trust proxy', true);
+} else {
+  const trustProxyHops = Number(trustProxyConfig);
+  if (!Number.isNaN(trustProxyHops) && trustProxyHops > 0) {
+    app.set('trust proxy', trustProxyHops);
+  }
+}
+
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production'
     ? [process.env.FRONTEND_URL, 'https://finflow-steel-delta.vercel.app']
@@ -188,11 +198,46 @@ const debtController = require('./src/controllers/debtController');
 const analyticsController = require('./src/controllers/analyticsController');
 const portfolioController = require('./src/controllers/portfolioController');
 
-const limiter = rateLimit({
+const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === 'production' ? 100 : 600,
+  max: process.env.NODE_ENV === 'production' ? 300 : 1200,
   message: 'Too many requests from this IP, please try again later.',
-  skip: (req) => req.method === 'OPTIONS'
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) =>
+    req.method === 'OPTIONS' ||
+    req.path === '/api/auth/login' ||
+    req.path === '/api/auth/register'
+});
+
+const normalizeLimiterEmail = (email) => String(email || '').trim().toLowerCase();
+
+const authLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'production' ? 20 : 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const email = normalizeLimiterEmail(req.body?.email);
+    return `${req.ip}::${email || 'unknown-email'}`;
+  },
+  message: {
+    success: false,
+    message: 'Too many login attempts. Please wait 15 minutes and try again.'
+  }
+});
+
+const authRegisterLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: process.env.NODE_ENV === 'production' ? 10 : 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}::register`,
+  message: {
+    success: false,
+    message: 'Too many signup attempts. Please wait and try again.'
+  }
 });
 
 app.use((req, res, next) => {
@@ -209,7 +254,9 @@ app.use(compression());
 if (process.env.ENABLE_HTTP_LOGS === 'true') {
   app.use(morgan('combined'));
 }
-app.use(limiter);
+app.use(globalLimiter);
+app.use('/api/auth/login', authLoginLimiter);
+app.use('/api/auth/register', authRegisterLimiter);
 
 // Pass Transaction model to debt controller
 app.use((req, res, next) => {
