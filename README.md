@@ -71,7 +71,6 @@ https://drive.google.com/file/d/1thcU6A24lP53D-6aLuGj6aMRhO2bEzOQ/view?usp=shari
 - MongoDB + Mongoose
 - JWT authentication
 - bcryptjs
-- Joi validation
 - Multer (file upload)
 - csv-parser + csv-writer
 - Helmet
